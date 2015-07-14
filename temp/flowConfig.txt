@@ -1,0 +1,11 @@
+alpha   1.14	% (float) Streamwise wavenumber of periodic box
+beta    2.5	% (float) Spanwise wavenumber of periodic box
+omega   0.0	% (float) Fundamental frequency resolved in computation
+ReLam   400.0 	% (float) Re based on laminar base flow
+isPois  0	% (0 or 1) 1 for Poiseuille flow, 0 for Couette
+noise   0.0	% (float) Norm of white noise to be added
+L       23      % (int) Number of positive streamwise Fourier modes 
+M       23	% (int) Number of positive spanwise Fourier modes
+N       35	% (int) Number of Chebyshev collocation nodes
+K       0	% (int) Number of positive Fourier frequency modes
+--- 0 ---- ---- WARNING: No text goes after this line. DO NOT EDIT THIS LINE AT ALL.
