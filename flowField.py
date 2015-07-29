@@ -2,7 +2,7 @@ import numpy as np
 import scipy as sp
 #from scipy.linalg import norm
 from warnings import warn
-from pseudo import chebdif
+from pseudo import chebdif, clencurt
 #from pseudo.py import chebint
 
 defaultDict = {'alpha':1.14, 'beta' : 2.5, 'omega':0.0, 'L': 23, 'M': 23, 'nd':3,'N': 35, 'K':0,
@@ -284,6 +284,13 @@ class flowField(np.ndarray):
         ''' Returns the imaginary part of the flowField (the entries are still complex, with zero imaginary parts)'''
         return flowField(arr=self.copyArray().imag,flowDict=self.flowDict)
     
+    def conjugate(self):
+        ''' Returns complex conjugate of flowFIeld instance'''
+        return self.real()-1.j*self.imag()
+    def abs(self):
+        '''Returns absolute value of entries of flowField instance (still expressed as complex numbers, but with zero imaginary part and positive real part)'''
+        return flowField(arr=np.abs(self.copyArray()),flowDict=self.flowDict.copy())
+    
     def ddt(self):
         ''' Returns a flowField instance that gives the partial derivative along "t" '''
         if self.nt == 1:
@@ -385,7 +392,7 @@ class flowField(np.ndarray):
         tempDict['nd'] = nd
         return flowField(arr=convTerm, flowDict=tempDict)
     
-    def grad3d(self, scalDim=0, nd=3, partialX=flowField.ddx, partialY=flowField.ddy, partialZ = flowField.ddz):
+    def grad3d(self, scalDim=0, nd=3, partialX=flowField.ddx, partialY=flowField.ddy, partialZ=flowField.ddz):
         ''' Computes gradient (in 3d by default) of either a scalar flowField object, 
             or of the first variable in a vector flowField object. 
             Grads of other variables can be calculated by passing scalDim=<index of variable>.
@@ -430,5 +437,18 @@ class flowField(np.ndarray):
             divergence[:] += partialZ(self.getScalar(nd=2))
         
         return divergence
+    
+    def sumAll(self):
+        '''Sums all elements of a flowField object (along all axes)'''
+        obj = self.view4d().copyArray()
+        return np.sum(np.sum(np.sum(np.sum(np.sum(obj,axis=4),axis=3),axis=2),axis=1),axis=0)
+    
+    def dot(self, vec2):
+        assert isinstance(vec2,flowField), 'Inner products are only defined for flowField objects. Ensure passed object is a flowField instance'
+        assert (self.flowDict == vec2.flowDict), 'Method for inner products is currently unable to handle instances with different flowDicts'
         
-        
+        w = clencurt(self.N).reshape((1,1,1,1,self.N))
+        return flowField.sumAll(self*vec2.conjugate()*w)
+    
+    def norm(self):
+        return np.sqrt(np.abs(self.dot(self)))
