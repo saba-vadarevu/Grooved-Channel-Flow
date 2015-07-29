@@ -5,7 +5,7 @@ from warnings import warn
 from pseudo import chebdif
 #from pseudo.py import chebint
 
-defaultDict = {'alpha':1.14, 'beta' : 2.5, 'omega':0.0, 'L': 23, 'M': 23, 'nd':4,'N': 35, 'K':0,
+defaultDict = {'alpha':1.14, 'beta' : 2.5, 'omega':0.0, 'L': 23, 'M': 23, 'nd':3,'N': 35, 'K':0,
                'ReLam': 400.0, 'isPois':0.0, 'noise':0.0 }
 
 def verify_dict(tempDict):
@@ -73,9 +73,10 @@ class flowField(np.ndarray):
         '''
         if flowDict is None:
             if dictFile is None:
-                flowDict = defaultDict
                 if hasattr(arr,'flowDict'):
                     flowDict = arr.flowDict
+                else:
+                    flowDict=verify_dict(flowDict)
             else:
                 flowDict = verify_dict(read_dictFile(dictFile))
         else:
@@ -300,7 +301,17 @@ class flowField(np.ndarray):
         tempArr = (np.ones((self.nt,self.nx))*lArr).reshape(self.nt,self.nx,1,1,1)
         partialX[:] = 1.j*self.flowDict['alpha']*tempArr*partialX
         return partialX
-            
+    
+    def ddx2(self):
+        ''' Returns a flowField instance that gives the second partial derivative along "x" '''
+        if self.nx == 1:
+            return -1.*(self.flowDict['alpha']**2)*self.copy()
+        partialX2 = self.view4d().copy()
+        lArr = np.arange(-self.flowDict['L'],self.flowDict['L']+1)
+        tempArr = -(np.ones((self.nt,self.nx))*lArr**2).reshape(self.nt,self.nx,1,1,1)
+        partialX2[:] = self.flowDict['alpha']**2*tempArr*partialX2
+        return partialX2
+    
     def ddz(self):
         ''' Returns a flowField instance that gives the partial derivative along "z" '''
         if self.nz == 1:
@@ -310,7 +321,17 @@ class flowField(np.ndarray):
         tempArr = (np.ones((self.nt,self.nx,self.nz))*mArr).reshape(self.nt,self.nx,self.nz,1,1)
         partialZ[:] = 1.j*self.flowDict['beta']*tempArr*partialZ
         return partialZ
-        
+    
+    def ddz2(self):
+        ''' Returns a flowField instance that gives the second partial derivative along "z" '''
+        if self.nz == 1:
+            return -1.*(self.flowDict['beta']**2)*self.copy()
+        partialZ2 = self.view4d().copy()
+        mArr = np.arange(-self.flowDict['M'],self.flowDict['M']+1)
+        tempArr = -(np.ones((self.nt,self.nx,self.nz))*mArr**2).reshape(self.nt,self.nx,self.nz,1,1)
+        partialZ2[:] = self.flowDict['beta']**2*tempArr*partialZ2
+        return partialZ2
+    
     def ddy(self):
         ''' Returns a flowField instance that gives the partial derivative along "y" '''
         partialY = self.view1d().copy()
@@ -319,4 +340,95 @@ class flowField(np.ndarray):
         for n in range(self.nt*self.nx*self.nz*self.nd):
             partialY[n*N:(n+1)*N] = np.dot(D, partialY[n*N:(n+1)*N])
         return partialY.view4d()
+    
+    def ddy2(self):
+        ''' Returns a flowField instance that gives the partial derivative along "y" '''
+        partialY2 = self.view1d().copy()
+        N = partialY2.flowDict['N']
+        D2 = (chebdif(N,2)[1])[:,:,1].reshape(N,N)
+        for n in range(self.nt*self.nx*self.nz*self.nd):
+            partialY2[n*N:(n+1)*N] = np.dot(D2, partialY2[n*N:(n+1)*N])
+        return partialY2.view4d()
+
+
+    def convLinear(self,uBase=None):
+        ''' Computes linearized convection term as [U u_x + v U',  U v_x,  U w_x ]
+        Baseflow, uBase must be a 1D array of size "N" '''
+        N = self.N
+        y,DM = chebdif(N,1)
+        if uBase == None:
+            if self.flowDict['isPois'] == 1:
+                uBase = 1.- y**2
+            else:
+                uBase = y
+        else: 
+            assert uBase.size == N, 'uBase should be 1D array of size "self.N"'
+        D = DM.reshape((N,N))
+        duBase = np.dot(D,uBase).reshape((1,1,1,N))
+        uBase = uBase.reshape((1,1,1,1,N))
+        
+        nd = 3
+        if self.nd > 3:
+            warn('Convection term is being requested using a flowField with more than 3 components. \n',
+            'Taking only the first 3 components ')
+        elif self.nd == 2:
+            nd = 2
+        elif self.nd < 2: 
+            raise RuntimeError('Need at least 2D perturbations for linear stability analysis')
+        
+        a = self.flowDict['alpha']
+        
+        convTerm = np.zeros((self.nt, self.nx, self.nz, nd, self.N), dtype=np.complex)
+        convTerm = uBase*1.j*a*self.view4d()[:,:,:,:nd].copyArray()
+        convTerm[:,:,:,0] += duBase*self.view4d()[:,:,:,1].copyArray()
+        tempDict = self.flowDict.copy()
+        tempDict['nd'] = nd
+        return flowField(arr=convTerm, flowDict=tempDict)
+    
+    def grad3d(self, scalDim=0, nd=3, partialX=flowField.ddx, partialY=flowField.ddy, partialZ = flowField.ddz):
+        ''' Computes gradient (in 3d by default) of either a scalar flowField object, 
+            or of the first variable in a vector flowField object. 
+            Grads of other variables can be calculated by passing scalDim=<index of variable>.
+            Gradients in 2D (x and y) can be calculated by passing nd=2'''
+        tempDict = self.flowDict.copy()
+        tempDict['nd'] = nd
+        if self.nd ==1:
+            scal = self
+        else:
+            scal = self.getScalar(nd=scalDim)
+        scal.verify()
+        if nd == 3:
+            gradVec = makeVector(partialX(scal), partialY(scal), partialZ(scal))
+        elif nd ==2:
+            gradVec = makeVector(partialX(scal),partialY(scal))
+        
+        return gradVec
+    
+    def grad(self,**kwargs):
+        return self.grad3d(**kwargs)
+    
+    def grad2d(self, **kwargs):
+        ''' Computes gradients in 2D (streamwise & wall-normal) for a scalar flowField object, 
+            or for the scalar component of a vector field identified as vecField[:,:,:,scalDim]'''
+        kwargs['nd'] = 2
+        return self.grad3d(**kwargs)
+        
+    def laplacian(self, partialX2=flowField.ddx2, partialY2=flowField.ddy2, partialZ2=flowField.ddz2):
+        lapl = self.view4d().copy()
+        for scalDim in range(lapl.nd):
+            lapl[:,:,:,scalDim] = partialX2(lapl[:,:,:,scalDim])+partialY2(lapl[:,:,:,scalDim])+partialZ2(lapl[:,:,:,scalDim])
+        return lapl
+        
+    def div(self, partialX=flowField.ddx, partialY=flowField.ddy, partialZ=flowField.ddz, nd=3):
+        ''' Computes divergence of vector field as u_x+v_y+w_z
+        If a flowField with more than 3 scalars (nd>3) is supplied, takes first three components as u,v,w.
+        Optional: 2-D divergence, u_x+v_y can be requested by passing nd=2'''
+        assert nd in [2,3], ('Argument "nd" can only take values 2 or 3')
+        assert self.nd >= nd, ('Too few scalar components in the vector')
+        divergence = partialX(self.getScalar(nd=0)) + partialY(self.getScalar(nd=1))
+        if nd== 3:
+            divergence[:] += partialZ(self.getScalar(nd=2))
+        
+        return divergence
+        
         
