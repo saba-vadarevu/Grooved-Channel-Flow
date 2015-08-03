@@ -8,6 +8,9 @@ from pseudo import chebdif, clencurt
 defaultDict = {'alpha':1.14, 'beta' : 2.5, 'omega':0.0, 'L': 23, 'M': 23, 'nd':3,'N': 35, 'K':0,
                'ReLam': 400.0, 'isPois':0.0, 'noise':0.0 }
 
+defaultBaseDict = {'alpha':0, 'beta' : 0, 'omega':0.0, 'L': 0, 'M': 0, 'nd':1,'N': 35, 'K':0,
+               'ReLam': 400.0, 'isPois':0.0, 'noise':0.0 }
+
 def verify_dict(tempDict):
     '''Verify that the supplied flowDict has all the parameters required'''
     change_parameters = False
@@ -16,13 +19,12 @@ def verify_dict(tempDict):
         warn('No flowDict was supplied. Assigning the default dictionary')
     else: 
         for key in defaultDict:
-            if key not in tempDict:
-                change_parameters = True
-                tempDict[key] = defaultDict[key]
+            assert key in tempDict, 'Some dictionary keys are missing'
     [tempDict['K'],tempDict['L'],tempDict['N'],tempDict['isPois']] = [int(abs(k)) for k in [tempDict['K'],tempDict['L'],tempDict['N'],tempDict['isPois']]]
     tempDict['M'] = int(tempDict['M'])
-    if change_parameters:
-        warn('The supplied dictionary had some parameters missing. These were provided from the default dictionary')
+    if tempDict['alpha'] == 0.: assert tempDict['L'] == 0, 'If alpha is zero, L should also be set to zero in the dictionary'
+    if tempDict['beta'] == 0.: assert tempDict['M'] == 0, 'If beta is zero, M should also be set to zero in the dictionary'
+    if tempDict['omega'] == 0.: assert tempDict['K'] == 0, 'If omega is zero, K should also be set to zero in the dictionary'
     return tempDict
 
 def read_dictFile(dictFile):
@@ -140,10 +142,8 @@ class flowField(np.ndarray):
                 (self.nz == int(3.*abs(self.flowDict['M'])/2. - self.flowDict['M']/2. + 1)) and
                 (self.N == self.flowDict['N']) and (self.nd == self.flowDict['nd'])): 
             raise RuntimeError('The shape attributes of the flowField instance are not consistent with dictionary entries')
-        if not (self.size == self.nt*self.nx*self.nz*self.nd*self.N):
-            raise RuntimeError('The size of the flowField array is not consistent with its shape attributes')
+        assert self.size == self.nt*self.nx*self.nz*self.nd*self.N, 'The size of the flowField array is not consistent with its shape attributes'
         
-
     def view1d(self):
         ''' Returns a 1d view. 
         Don't try to figure out what the ordering is, just use self.view4d() to get an organized view'''
@@ -304,9 +304,8 @@ class flowField(np.ndarray):
         if self.nx == 1:
             return 1.j*self.flowDict['alpha']*self.copy()
         partialX = self.view4d().copy()
-        lArr = np.arange(-self.flowDict['L'],self.flowDict['L']+1)
-        tempArr = (np.ones((self.nt,self.nx))*lArr).reshape(self.nt,self.nx,1,1,1)
-        partialX[:] = 1.j*self.flowDict['alpha']*tempArr*partialX
+        lArr = np.arange(-self.flowDict['L'],self.flowDict['L']+1).reshape(1,self.nx,1,1,1)
+        partialX[:] = 1.j*self.flowDict['alpha']*lArr*partialX
         return partialX
     
     def ddx2(self):
@@ -314,9 +313,8 @@ class flowField(np.ndarray):
         if self.nx == 1:
             return -1.*(self.flowDict['alpha']**2)*self.copy()
         partialX2 = self.view4d().copy()
-        lArr = np.arange(-self.flowDict['L'],self.flowDict['L']+1)
-        tempArr = -(np.ones((self.nt,self.nx))*lArr**2).reshape(self.nt,self.nx,1,1,1)
-        partialX2[:] = self.flowDict['alpha']**2*tempArr*partialX2
+        l2Arr = (np.arange(-self.flowDict['L'],self.flowDict['L']+1)**2).reshape(1,self.nx,1,1,1)
+        partialX2[:] = -self.flowDict['alpha']**2*l2Arr*partialX2
         return partialX2
     
     def ddz(self):
@@ -324,9 +322,9 @@ class flowField(np.ndarray):
         if self.nz == 1:
             return 1.j*self.flowDict['beta']*self.copy()
         partialZ = self.view4d().copy()
-        mArr = np.arange((self.flowDict['M']-np.abs(self.flowDict['M']))/2,self.flowDict['M']+1)
-        tempArr = (np.ones((self.nt,self.nx,self.nz))*mArr).reshape(self.nt,self.nx,self.nz,1,1)
-        partialZ[:] = 1.j*self.flowDict['beta']*tempArr*partialZ
+        M = self.flowDict['M']
+        mArr = np.arange( (M-abs(M))/2,abs(M)+1 ) .reshape((1,1,self.nz,1,1))
+        partialZ[:] = 1.j*self.flowDict['beta']*mArr*partialZ
         return partialZ
     
     def ddz2(self):
@@ -334,9 +332,10 @@ class flowField(np.ndarray):
         if self.nz == 1:
             return -1.*(self.flowDict['beta']**2)*self.copy()
         partialZ2 = self.view4d().copy()
-        mArr = np.arange(-self.flowDict['M'],self.flowDict['M']+1)
-        tempArr = -(np.ones((self.nt,self.nx,self.nz))*mArr**2).reshape(self.nt,self.nx,self.nz,1,1)
-        partialZ2[:] = self.flowDict['beta']**2*tempArr*partialZ2
+        M = self.flowDict['M']
+        mArr = np.arange( (M-abs(M))/2,abs(M)+1 ).reshape((1,1,self.nz,1,1))
+        m2Arr = (mArr**2).reshape(1,1,self.nz,1,1)
+        partialZ2[:] = -self.flowDict['beta']**2*m2Arr*partialZ2
         return partialZ2
     
     def ddy(self):
@@ -362,41 +361,38 @@ class flowField(np.ndarray):
         ''' Computes linearized convection term as [U u_x + v U',  U v_x,  U w_x ]
         Baseflow, uBase must be a 1D array of size "N" '''
         N = self.N
-        y,DM = chebdif(N,1)
+        y = chebdif(N,1)[0]
         if uBase == None:
-            if self.flowDict['isPois'] == 1:
-                uBase = 1.- y**2
-            else:
-                uBase = y
-        else: 
-            assert uBase.size == N, 'uBase should be 1D array of size "self.N"'
-        D = DM.reshape((N,N))
-        duBase = np.dot(D,uBase).reshape((1,1,1,N))
-        uBase = uBase.reshape((1,1,1,1,N))
+            if self.flowDict['isPois'] == 1: uBase = 1.- y**2
+            else: uBase = y
+        else: assert uBase.size == N, 'uBase should be 1D array of size "self.N"'
         
-        nd = 3
-        if self.nd > 3:
+        baseDict = defaultBaseDict
+        baseDict['N'] = N
+        uBaseFF = flowField(arr=uBase.reshape((1,1,1,1,N)),flowDict=baseDict).view4d()
+        
+        obj=self.view4d()
+        if self.nd > 3: 
             warn('Convection term is being requested using a flowField with more than 3 components. \n',
             'Taking only the first 3 components ')
-        elif self.nd == 2:
-            nd = 2
+            obj = self.slice(nd=3).view4d()
         elif self.nd < 2: 
             raise RuntimeError('Need at least 2D perturbations for linear stability analysis')
         
-        a = self.flowDict['alpha']
-        
-        convTerm = np.zeros((self.nt, self.nx, self.nz, nd, self.N), dtype=np.complex)
-        convTerm = uBase*1.j*a*self.view4d()[:,:,:,:nd].copyArray()
-        convTerm[:,:,:,0] += duBase*self.view4d()[:,:,:,1].copyArray()
-        tempDict = self.flowDict.copy()
-        tempDict['nd'] = nd
-        return flowField(arr=convTerm, flowDict=tempDict)
+        convTerm = flowField(flowDict = obj.flowDict.copy())
+        convTerm[:] = uBaseFF*obj.ddx()
+        convTerm[:,:,:,0:1] += uBaseFF.ddy()*self.getScalar(nd=1).view4d()
+        convTerm.verify()
+        return convTerm
     
-    def grad3d(self, scalDim=0, nd=3, partialX=flowField.ddx, partialY=flowField.ddy, partialZ=flowField.ddz):
+    def grad3d(self, scalDim=0, nd=3, partialX=None, partialY=None, partialZ=None):
         ''' Computes gradient (in 3d by default) of either a scalar flowField object, 
             or of the first variable in a vector flowField object. 
             Grads of other variables can be calculated by passing scalDim=<index of variable>.
             Gradients in 2D (x and y) can be calculated by passing nd=2'''
+        if partialX == None: partialX = flowField.ddx
+        if partialY == None: partialY = flowField.ddy
+        if partialZ == None: partialZ = flowField.ddz
         tempDict = self.flowDict.copy()
         tempDict['nd'] = nd
         if self.nd ==1:
@@ -420,16 +416,22 @@ class flowField(np.ndarray):
         kwargs['nd'] = 2
         return self.grad3d(**kwargs)
         
-    def laplacian(self, partialX2=flowField.ddx2, partialY2=flowField.ddy2, partialZ2=flowField.ddz2):
+    def laplacian(self, partialX2=None, partialY2=None, partialZ2=None):
+        if partialX2 == None: partialX2 = flowField.ddx2
+        if partialY2 == None: partialY2 = flowField.ddy2
+        if partialZ2 == None: partialZ2 = flowField.ddz2
         lapl = self.view4d().copy()
         for scalDim in range(lapl.nd):
             lapl[:,:,:,scalDim] = partialX2(lapl[:,:,:,scalDim])+partialY2(lapl[:,:,:,scalDim])+partialZ2(lapl[:,:,:,scalDim])
         return lapl
         
-    def div(self, partialX=flowField.ddx, partialY=flowField.ddy, partialZ=flowField.ddz, nd=3):
+    def div(self, partialX=None, partialY=None, partialZ=None, nd=3):
         ''' Computes divergence of vector field as u_x+v_y+w_z
         If a flowField with more than 3 scalars (nd>3) is supplied, takes first three components as u,v,w.
         Optional: 2-D divergence, u_x+v_y can be requested by passing nd=2'''
+        if partialX == None: partialX = flowField.ddx
+        if partialY == None: partialY = flowField.ddy
+        if partialZ == None: partialZ = flowField.ddz
         assert nd in [2,3], ('Argument "nd" can only take values 2 or 3')
         assert self.nd >= nd, ('Too few scalar components in the vector')
         divergence = partialX(self.getScalar(nd=0)) + partialY(self.getScalar(nd=1))
@@ -452,3 +454,79 @@ class flowField(np.ndarray):
     
     def norm(self):
         return np.sqrt(np.abs(self.dot(self)))
+    
+    def convNL(self, uBase=None):
+        '''Computes the non-linear convection term, given a fluctuation flow field (base flow is added when calculating)
+        Warning: Currently, the code assumes that the flowField supplied is that of a steady flow. Temporal frequencies are not accounted for'''
+        
+        # If the only modes are, say {(a,-2b),(a,-b),(a,0),(a,b),(a,2b)}, 
+        #    then the only non-linear interactions that produce these modes are when the above modes interact with (0,0)
+        #    Interactions within the above modes can only produce {(2a,nb)} with doesn't belong to the set
+        # Similarly for {(-na,b),(-na+a,b),..,(0,b),(a,b),..,(na,b)}. The convection term is simply the linear part of it (for a given base flow)
+        # For a single mode, (a,b), the convection term that produces the mode is, again, its interaction with just (0,0)
+        if self.flowDict['L'] == 0 and self.flowDict['M']== 0: return self.convLinear(uBase=uBase)
+        if self.flowDict['L'] == 0 and self.flowDict['alpha'] != 0.: return self.convLinear(uBase=uBase)
+        if self.flowDict['M'] == 0 and self.flowDict['beta'] != 0.: return self.convLinear(uBase=uBase)
+        
+        # Ensuring a full set -|M|b,...,0b,..,|M|b is available before computing the convection term
+        if self.flowDict['M'] > 0 :
+            obj = self.slice(M=-self.flowDict['M'])
+            u = obj.getScalar(nd=0); v = obj.getScalar(nd=1) ; w = obj.getScalar(nd=2)
+            tempDict = obj.flowDict.copy()
+        else:
+            u = self.getScalar(nd=0);  v = self.getScalar(nd=1); w = self.getScalar(nd=2)
+            tempDict = self.flowDict.copy()
+        L = tempDict['L']; M = tempDict['M']; N = tempDict['N']
+        nx = 2*L+1; nz= 2*abs(M)+1
+        
+        # Computing the base flow and adding it to the flowField before computing the convection term
+        y = chebdif(N,1)[0]
+        if uBase == None:
+            if tempDict['isPois']==1:
+                uBase = y**2
+            else:
+                uBase = y
+        u[0, L, -M ,0] += uBase
+                
+        tempDict = self.flowDict.copy()
+        tempDict['nd'] = 3
+        convTerm = flowField(flowDict=tempDict).view4d()
+        
+        
+        ux = u.ddx(); uy = u.ddy(); uz = u.ddz()
+        vx = v.ddx(); vy = v.ddy(); vz = v.ddz()
+        wx = w.ddx(); wy = w.ddy(); wz = w.ddz()
+        
+        sumArr = lambda v: np.sum( np.sum( np.sum( v, axis=1), axis=1), axis=1)
+        
+        for lp in range(self.nx):
+            l = lp - L
+            l1 = l; l2 = None; l3 = None; l4 = l1-1; 
+            if l == 0: l4 = None
+            if l < 0:  
+                l1 = None; l2 = self.nx+l; l3 = l2-1; l4 = None
+                
+            for mp in range(self.nz):
+                m = mp - abs(M)
+                m1 = m; m2 = None; m3 = None; m4 = m1-1; 
+                if m == 0: m4 = None
+                if m < 0: 
+                    m1 = None; m2 = self.nz+m; m3 = m2-1; m4 = None
+                
+                convTerm[:,lp,mp,0] += sumArr(u[:,l1:l2,m1:m2]*ux[:,l3:l4:-1,m3:m4:-1])
+                convTerm[:,lp,mp,0] += sumArr(v[:,l1:l2,m1:m2]*uy[:,l3:l4:-1,m3:m4:-1])
+                convTerm[:,lp,mp,0] += sumArr(w[:,l1:l2,m1:m2]*uz[:,l3:l4:-1,m3:m4:-1])
+                
+                convTerm[:,lp,mp,1] += sumArr(u[:,l1:l2,m1:m2]*vx[:,l3:l4:-1,m3:m4:-1])
+                convTerm[:,lp,mp,1] += sumArr(v[:,l1:l2,m1:m2]*vy[:,l3:l4:-1,m3:m4:-1])
+                convTerm[:,lp,mp,1] += sumArr(w[:,l1:l2,m1:m2]*vz[:,l3:l4:-1,m3:m4:-1])
+                
+                convTerm[:,lp,mp,2] += sumArr(u[:,l1:l2,m1:m2]*wx[:,l3:l4:-1,m3:m4:-1])
+                convTerm[:,lp,mp,2] += sumArr(v[:,l1:l2,m1:m2]*wy[:,l3:l4:-1,m3:m4:-1])
+                convTerm[:,lp,mp,2] += sumArr(w[:,l1:l2,m1:m2]*wz[:,l3:l4:-1,m3:m4:-1])
+        
+        convTerm.verify()
+        return convTerm
+                
+                
+        
