@@ -2,20 +2,29 @@ import numpy as np
 import scipy as sp
 #from scipy.linalg import norm
 from warnings import warn
-from pseudo import chebdif, clencurt
+from pseudo import chebdif, clencurt, chebintegrate
 #from pseudo.py import chebint
 
 defaultDict = {'alpha':1.14, 'beta' : 2.5, 'omega':0.0, 'L': 23, 'M': 23, 'nd':3,'N': 35, 'K':0,
-               'ReLam': 400.0, 'isPois':0.0, 'noise':0.0 }
+               'Re': 400.0, 'isPois':0.0, 'noise':0.0 }
 
 defaultBaseDict = {'alpha':0, 'beta' : 0, 'omega':0.0, 'L': 0, 'M': 0, 'nd':1,'N': 35, 'K':0,
-               'ReLam': 400.0, 'isPois':0.0, 'noise':0.0 }
+               'Re': 400.0, 'isPois':0.0, 'noise':0.0 }
+
+divTol = 1.0e-06
+pCorrTol = 1.0e-04
+
+def getDefaultDict(base=False):
+    if base:
+        return defaultBaseDict.copy()
+    else:
+        return defaultDict.copy()
 
 def verify_dict(tempDict):
     '''Verify that the supplied flowDict has all the parameters required'''
     change_parameters = False
     if tempDict is None:
-        tempDict = defaultDict
+        tempDict = defaultDict.copy()
         warn('No flowDict was supplied. Assigning the default dictionary')
     else: 
         for key in defaultDict:
@@ -420,10 +429,7 @@ class flowField(np.ndarray):
         if partialX2 == None: partialX2 = flowField.ddx2
         if partialY2 == None: partialY2 = flowField.ddy2
         if partialZ2 == None: partialZ2 = flowField.ddz2
-        lapl = self.view4d().copy()
-        for scalDim in range(lapl.nd):
-            lapl[:,:,:,scalDim] = partialX2(lapl[:,:,:,scalDim])+partialY2(lapl[:,:,:,scalDim])+partialZ2(lapl[:,:,:,scalDim])
-        return lapl
+        return partialX2(self)+partialY2(self)+partialZ2(self)
         
     def div(self, partialX=None, partialY=None, partialZ=None, nd=3):
         ''' Computes divergence of vector field as u_x+v_y+w_z
@@ -481,7 +487,7 @@ class flowField(np.ndarray):
         
         # Computing the base flow and adding it to the flowField before computing the convection term
         y = chebdif(N,1)[0]
-        if uBase == None:
+        if uBase is None:
             if tempDict['isPois']==1:
                 uBase = y**2
             else:
@@ -526,7 +532,141 @@ class flowField(np.ndarray):
                 convTerm[:,lp,mp,2] += sumArr(w[:,l1:l2,m1:m2]*wz[:,l3:l4:-1,m3:m4:-1])
         
         convTerm.verify()
+        if self.flowDict['M']>0:
+            convTerm = convTerm.slice(M=self.flowDict['M'])
         return convTerm
-                
-                
+        
+    def intY(self):
+        ''' Integrate each Fourier mode of each scalar along the wall-normal axis
+        Returns a flowField object of the same size as self.
+        Use this method to compute variables from their wall-normal derivatives'''
+        integral = self.copy().reshape((self.size/self.N, self.N))
+        arr = integral.copyArray()
+        for n in range(np.int(integral.size/integral.N)):
+            integral[n] = chebintegrate(arr[n])
+        integral.verify()
+        return integral.view4d()
+    
+    def residuals(self,pField=None, nonLinear=True, divFree=False, uBase=None):
+        ''' Computes the residuals of the momentum equations for a velocity field.
+        Arguments:
+        pField is the pressure field (optional). 
+            When not supplied, the pressure is taken to be zero everywhere
+        nonLinear (flag) defaults to True
+            When set to False, convLinear() is used to evaluate convection term. When true, convNL() is used.
+        divFree (flag) defaults to False
+            When set to False, nothing is done. This means the field could have a non-zero divergence
+            When set to True, wall-normal velocity is changed to ensure divergence is zero.
+                WARNING: THIS CHANGES THE FLOWFIELD OBJECT THAT IS PASSED. To avoid this, call self.copy().residuals()
+        When only a velocity field is available, use solvePressure[1] to get the residuals instead.'''
+        assert self.nd == 3, 'Method only accepts 3D flowfields'
+        residual = flowField(flowDict=self.flowDict.copy())
+        L = self.flowDict['L']; M = self.flowDict['M']
+        if divFree:
+            # u_x + v_y + w_z = div. 
+            # To ensure divergence is zero, correct 'v' as v += - \int div * dy
+            divergence = self.div()
+            divergence[divergence < divTol] = 0.
+            # vCorrection = -(self.div()).intY()
+            self.view4d()[:,:,:,1:2] -= divergence.intY()
+        
+        if pField is None:
+            tempDict = self.flowDict.copy(); tempDict['nd'] = 1
+            pField = flowField(flowDict=tempDict)
+        else: 
+            assert (pField.nd == 1) and (pField.size == np.int(self.size/3)), 'pField should be a scalar of the same size as each scalar of velocity'
+        
+        residual[:] += pField.grad() - (1./self.flowDict['Re'])*self.laplacian()
+        if nonLinear:
+            residual[:] += self.convNL()
+        else:
+            residual[:] += self.convLinear()
+        
+        residual[:,:,:,:,[0,-1]] = self[:,:,:,:,[0,-1]]
+        
+        return residual
+    
+    def solvePressure(self, pField=None, residuals=None, divFree=False, nonLinear=True):
+        ''' Solves for pressure, given a 3D velocity field.
+            RETURNS TWO FLOWFIELD INSTANCES: The first one is the corrected pField, the second is the residual when the corrected pressure is used
+        If pField is supplied, only corrections about this field need to be calculated. The returned field is pField + corrections computed.
+        If residuals is supplied (should be evaluations of the momentum equations using 'self' and 'pField'), 
+            the NSE need not be evaluated again, and solving for the pressure field is quite fast
+        If residuals is not supplied, the momentum equations are evaluated in the function, and that takes a while
+        NOTE: The method does not solve a Poisson equation. 
+        Instead, the following approach is used:
+            Wall-normal momentum gives wall-normal derivative of each pressure Fourier mode
+                Integrating the wall-normal gradient gives the pressure up to a constant 
+                In this step, the constant is set such that the pressure at y=1 is zero for each mode
+            The residuals of streamwise momentum equation and spanwise momentum equation are averaged to get the actual constant (minimizes the residuals)'''
+        
+        assert self.nd == 3, 'The flowField instance supplied must be a 3D velocity field'
+        assert isinstance(pField,flowField), 'pField must be a flowField instance'
+        tempDict = self.flowDict.copy()
+        tempDict['nd'] = 1
+        pCorrection = flowField(flowDict=tempDict)
+        
+        if pField is None:
+            pField = flowField(flowDict=tempDict)  # Initializes a zero field
+        else:
+            assert pField.size == self.size/3, 'pField must be of the same size of each component of the velocity field'
+        
+        # (u.div(v) - 1/Re* laplacian(v) ) + dp_1/dy + dp_Corr/dy= 0,     where p_1 = pField (input argument),p_Corr is the correction
+        # p_Corr = - \int residual dy, where residual is the sum of first three terms on LHS
+        
+        pCorrection = None
+        if residuals is None:
+            residuals = self.residuals(pField=pField, divFree=divFree, nonLinear=nonLinear)
+        else: 
+            assert isinstance(residuals,flowField) and (residuals.nd == 3) and (residuals.size == self.size), 'residuals must be a 3D flowField object of the same size as self'
+            
+        pCorrection = - (residuals.getScalar(nd=1)).intY()
+        # pCorrection is now determined upto a constant. Next, find the constant that minimizes residual for streamwise, spanwise
+        
+        residuals[:,:,:,1:2] += pCorrection.ddy()
+        residuals[:,:,:,0:1] += pCorrection.ddx()
+        residuals[:,:,:,2:3] += pCorrection.ddz()
+        assert residuals.getScalar(nd=1).norm() < 1.0e-6, 'Wall-normal residual has not gone below 1.0e-6 even after correcting dpdy. Weird'
+        
+        # (....) + ilap = 0
+        # (....) + imbp = 0             a is \alpha, b is \beta, l and m identify Fourier mode
+        # Constant that minimizes streamwise residual norm is   \int (-(residual_x)/ila) dy
+        # Creating arrays to hold the constants
+        constX = np.zeros((self.nt,self.nx,self.nz),dtype=np.complex) 
+        constZ = constX.copy()
+        
+        w = clencurt(self.N).reshape((1,1,1,1,self.N))
+        L = self.flowDict['L']; M = self.flowDict['M']
+        a = self.flowDict['alpha']; b = self.flowDict['beta']
+        lArr = np.arange(-L, L+1).reshape((1,self.nx,1,1)) 
+        lArr[0,L] = 1.   # Avoiding zeros, will account for this later (about 10 lines below)
+        mArr = np.arange( (M-abs(M))/2 , abs(M)+1 ).reshape((1,1,self.nz,1)) 
+        mArr[0,0,-(M-abs(M))/2] = 1.   # Avoiding zeros
+        
+        # Corrections only make sense when la != 0 and mb != 0. So keep entries of constX, constZ as zero when la= 0 or mb=0
+        if a != 0.:
+            constX[:] = -np.sum( w* (residuals.copyArray()[:,:,:,0]/1.j/lArr/a ), axis=-1)
+        if b != 0.:
+            constZ[:] = -np.sum( w* (residuals.copyArray()[:,:,:,2]/1.j/mArr/b ), axis=-1)
+        
+        constX[:,L ]  = 0.
+        constZ[:,:,(abs(M)-M)/2] = 0.
+        
+        const = None
+        if a == 0: const = constZ
+        elif b==0: const = constX
+        else: 
+            const = (constX + constZ)/2.
+            const[:,L] += constZ[:,L]/2.; const[:,:,(abs(M)-M)/2] += constX[:,:,(abs(M)-M)/2] 
+        
+        const = const.reshape((self.nt,self.nx,self.nz,1))
+        const[const<pCorrTol] = 0.
+        
+        residuals[:,:,:,0] += 1.j*lArr*a*const
+        residuals[:,:,:,2] += 1.j*mArr*b*const
+        pCorrection[:,:,:,0] += const
+        
+        return (pField.view4d()+pCorrection), residuals
+        
+            
         

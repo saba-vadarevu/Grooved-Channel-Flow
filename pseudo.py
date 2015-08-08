@@ -301,7 +301,6 @@ def presdifBL(N,Y):
 	return Dp
 
 
-import numpy as np
 def chebint (fk, x):
     speps = sp.finfo(float).eps # this is the machine epsilon
     N = sp.size(fk)
@@ -315,4 +314,26 @@ def chebint (fk, x):
     p = sp.dot(D,(w*fk))/(sp.dot(D,w))
     return p
 
+def chebintegrate(v):
+    ''' Integrates 'v' over Chebyshev nodes, assuming v(1) (or, v[0]) = 0'''
+
+    coeffs = chebcoeffs(v)
+    int_coeffs = sp.zeros(v.size, dtype=coeffs.dtype)
+    N = v.size
+
+    # T_0 = 1,  T_1 = x, T_2 = 2x^2 -1
+    # \int T_0 dx = T_1
+    int_coeffs[1] = coeffs[0]
+
+    # \int T_1 dx = 0.25*T_2 + 0.25*T_0
+    int_coeffs[2] += 0.25*coeffs[1]
+    int_coeffs[0] += 0.25*coeffs[1]
+
+    # \int T_n dx = 0.5*[T_{n+1}/(n+1) - T_{n-1}/(n-1)]
+    nvec = sp.arange(0,N)
+    int_coeffs[3:] += 0.5/nvec[3:]*coeffs[2:N-1]
+    int_coeffs[1:N-1] -= 0.5/nvec[1:N-1]*coeffs[2:]
+
+    int_coll_vec = chebcoll_vec(int_coeffs)
+    return int_coll_vec - int_coll_vec[0]
 
