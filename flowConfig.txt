@@ -8,4 +8,6 @@ L       23      % (int) Number of positive streamwise Fourier modes
 M       23	% (int) Number of positive spanwise Fourier modes
 N       35	% (int) Number of Chebyshev collocation nodes
 K       0	% (int) Number of positive Fourier frequency modes
+lOffset 0.0     % (float) For fields that are not harmonics of alpha (above), a constant offset from harmonics
+mOffset 0.0     % (float) same as above, for spanwise- offset from harmonics of beta
 --- 0 ---- ---- WARNING: No text goes after this line. DO NOT EDIT THIS LINE AT ALL.
