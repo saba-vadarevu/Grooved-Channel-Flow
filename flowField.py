@@ -62,6 +62,9 @@ defaultBaseDict = {'alpha':0, 'beta' : 0, 'omega':0.0, 'L': 0, 'M': 0, 'nd':1,'N
 divTol = 1.0e-06
 pCorrTol = 1.0e-04
 
+
+    
+
 def getDefaultDict(base=False):
     if base:
         return defaultBaseDict.copy()
@@ -229,7 +232,7 @@ class flowField(np.ndarray):
         ndt = self.nd
         Nt = self.N
         flowDict_temp = self.flowDict.copy()
-        if K is not None:
+        if (K is not None) and (K != self.flowDict['K']):
             K = int(abs(K))
             Kt = flowDict_temp['K']               # Temporary name for 'K' of self
             if K <= Kt:
@@ -240,7 +243,7 @@ class flowField(np.ndarray):
             flowDict_temp['K']= K
             ntt = 2*K+1
         
-        if L is not None:
+        if (L is not None) and (L != self.flowDict['L']):
             L = int(abs(L))
             Lt = flowDict_temp['L']               # Temporary name for 'L' of self
             if L <= Lt:
@@ -251,7 +254,7 @@ class flowField(np.ndarray):
             flowDict_temp['L']= L
             nxt = 2*L+1
         
-        if M is not None:
+        if (M is not None) and (M != self.flowDict['M']):
             M = int(M)
             Mt = flowDict_temp['M']               # Temporary name for 'M' of self
             nzt = int(3.*abs(M)/2. - M/2. + 1)     # = 1 if L=0;    = L+1 if L>0;    = 2*|L|+1 if L<0
@@ -289,21 +292,21 @@ class flowField(np.ndarray):
                                np.zeros((ntt,nxt,abs(Mt-M),ndt,Nt),dtype=np.complex) ), axis=2)
             flowDict_temp['M']= M
         
-        if N is not None:
+        if (N is not None) and (N != self.flowDict['N']):
             N = abs(int(N))
             Nt = flowDict_temp['N']
             if N != Nt:
-                y = chebdif(Nt,1)[0]
-                obj_t = obj.reshape((obj.size/Nt,Nt))
-                obj = np.zeros((obj_t.size/Nt,N),dtype=np.complex)
-                for n in range(obj_t.size/N):
+                y = chebdif(N,1)[0]
+                obj_t = obj.reshape((obj.size//Nt,Nt))
+                obj = np.zeros((obj_t.size//Nt,N),dtype=np.complex)
+                for n in range(obj_t.size//N):
                     obj[n] = chebint(obj_t[n],y)
             obj = obj.reshape(obj.size)
             flowDict_temp['N'] = N
         
         obj = flowField(arr=obj, flowDict = flowDict_temp).view4d()
         
-        if nd is not None:
+        if (nd is not None):
             nd = np.asarray([nd])
             nd = nd.reshape(nd.size)
             obj = obj[:,:,:,nd]
@@ -792,5 +795,89 @@ class flowField(np.ndarray):
         
         return (pField.view4d()+pCorrection), residuals
         
+    def printCSV(self,xLoc=None, zLoc=None, tLoc=None, yOff=0.,pField=None, interY=2,toFile=True,fName='ff'):
+        '''Prints the velocities and pressure in a CSV file with columns ordered as X,Y,Z,U,V,W,P
+        Arguments (all keyword):
+            xLoc: streamwise locations where field variables need to be computed (default: [0:4*pi/alpha] 41 points)
+            zLoc: spanwise locations where field variables need to be computed (default: [0:2*pi/beta] 13 points)
+            tLoc: temporal locations (default: 7 points when omega != 0, 1 when omega = 0). Fields at different time-locations are printed to different files
+            pField: Pressure field (computed with divFree=False, nonLinear=True if pField not supplied)
+            interY: Field data is interpolated onto interY*self.N points before printing. Default for interY is 2
+            yOff: Use this to define wavy surfaces. For flat walls, yOff = 0. For wavy surfaces, yOff = 2*eps
+                    yOff is used to modify y-grid as   y[tn,xn,zn] += yOff*cos(alpha*x + beta*z - omega*t)
+            fname: Name of CSV file to be printed to. Default: ff.csv 
+            toFile: If true, prints field to file. If false, returns the physical field as a 5-d array
+                    The 5 dimensions are: (variable, time-location, x-loc, z-loc, y-loc)
+                    variables are ordered as (x,z,y,u,v,w,p)'''
+        print('printCSV called.............')
+        a = self.flowDict['alpha']; b = self.flowDict['beta']; omega = self.flowDict['omega']
+        K = self.flowDict['K']; L = self.flowDict['L']; M=-np.abs(self.flowDict['M'])
+        if xLoc is None:
+            if a != 0.: xLoc = np.arange(0,4.*np.pi/a, 2.*np.pi/a/20.)
+            else: xLoc = np.zeros(1)
+        if zLoc is None:
+            if b != 0: zLoc = np.arange(0,2.*np.pi/b, 2.*np.pi/b/12.)
+            else: zLoc = np.zeros(1)
+        if tLoc is None:
+            if omega != 0.: tLoc = np.arange(0,2.*np.pi/omega, 2.*np.pi/b/7.)
+            else: tLoc = np.zeros(1)
+        assert type(yOff) is float, 'yOff characterizes surface deformation and must be of type float'
+        if '.csv' in fName[-4:]: fName = fName[:-4]
+        
+        assert self.nd == 3, 'printCSV() is currently written to handle only 3C velocity fields'
+        assert isinstance(xLoc,np.ndarray) and isinstance(zLoc,np.ndarray) and isinstance(tLoc,np.ndarray),\
+            'xLoc and zLoc must be numpy arrays'
+        assert isinstance(fName,str), 'fName must be a string'
+        
+        if pField is None: pField = self.solvePressure(divFree=False,nonLinear=True)[0]
+        else:
+            assert isinstance(pField, flowField), 'pField must be an instance of flowField class'
+            assert pField.size == self.size//3, 'pField must be the same size of each component of self'
+        
+        dataArr = np.zeros((7,tLoc.size,xLoc.size,zLoc.size,interY*self.N))
+        tLoc = tLoc.reshape(tLoc.size,1,1,1)
+        xLoc = xLoc.reshape(1,xLoc.size,1,1)
+        zLoc = zLoc.reshape(1,1,zLoc.size,1)
+        
+        if interY != 1:
+            obj = self.slice(M=M, N=interY*self.N)
+            p = pField.slice(M=M, N=interY*self.N).copyArray()
+        else: obj = self.slice(M=M).copy(); p = pField.slice(M=M).copyArray()
+        p = p.reshape(obj.nt,obj.nx,obj.nz,obj.N)
+        
+        yLoc = chebdif(obj.N,1)[0]
+        yLoc = yLoc.reshape(1,1,1,yLoc.size)
+            
+        u = obj.getScalar(nd=0).copyArray().reshape(obj.nt,obj.nx,obj.nz, obj.N)
+        v = obj.getScalar(nd=1).copyArray().reshape(obj.nt,obj.nx,obj.nz, obj.N)
+        w = obj.getScalar(nd=2).copyArray().reshape(obj.nt,obj.nx,obj.nz, obj.N)
+                
+        lArr = (self.flowDict['lOffset']+ np.arange(-L,L+1)).reshape((1,self.nx,1,1))
+        mArr = (self.flowDict['mOffset']+ np.arange(M,-M+1)).reshape((1,1,self.nz,1))
+        kArr = np.arange(-K,K+1).reshape((self.nt,1,1,1))
+        
+        sumArr = lambda arr: np.sum(np.sum(np.sum(arr,axis=0),axis=0),axis=0).real
+        dataArr[0] = xLoc; dataArr[1] = zLoc; dataArr[2] = yLoc + yOff*np.cos(a*xLoc+b*zLoc-omega*tLoc)
+        for tn in range(tLoc.size):
+            t = tLoc[tn,0,0,0]
+            for xn in range(xLoc.size):
+                x = xLoc[0,xn,0,0]
+                for zn in range(zLoc.size):
+                    z = zLoc[0,0,zn,0]
+                    dataArr[3,tn,xn,zn] = sumArr( u * np.exp( 1.j*(lArr*a*x + mArr*b*z - kArr*omega*t) ) )
+                    dataArr[4,tn,xn,zn] = sumArr( v * np.exp( 1.j*(lArr*a*x + mArr*b*z - kArr*omega*t) ) )
+                    dataArr[5,tn,xn,zn] = sumArr( w * np.exp( 1.j*(lArr*a*x + mArr*b*z - kArr*omega*t) ) )
+                    dataArr[6,tn,xn,zn] = sumArr( p * np.exp( 1.j*(lArr*a*x + mArr*b*z - kArr*omega*t) ) )
+        
+        if toFile:
+            if tLoc.size == 1:
+                np.savetxt(fName+'.csv', dataArr.reshape((7,dataArr.size//7)).T,delimiter=',')
+                print('Printed physical field to file %s.csv'%fName)
+            else:
+                for tn in range(tLoc.size):
+                    np.savetxt(fName+str(tn)+'.csv', dataArr[:,tn].reshape((7,dataArr[:,tn].size//7)).T,delimiter=',')
+                print('Printed %d time-resolved physical fields to files %sX.csv'%(tLoc.size,fName))
+            return
+        return dataArr
             
         
