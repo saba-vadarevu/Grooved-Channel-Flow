@@ -50,7 +50,7 @@ import numpy as np
 import scipy as sp
 #from scipy.linalg import norm
 from warnings import warn
-from pseudo import chebdif, clencurt, chebintegrate
+from pseudo import chebdif, clencurt, chebintegrate, chebint
 #from pseudo.py import chebint
 
 defaultDict = {'alpha':1.14, 'beta' : 2.5, 'omega':0.0, 'L': 23, 'M': 23, 'nd':3,'N': 35, 'K':0,
@@ -299,7 +299,7 @@ class flowField(np.ndarray):
                 y = chebdif(N,1)[0]
                 obj_t = obj.reshape((obj.size//Nt,Nt))
                 obj = np.zeros((obj_t.size//Nt,N),dtype=np.complex)
-                for n in range(obj_t.size//N):
+                for n in range(obj_t.size//Nt):
                     obj[n] = chebint(obj_t[n],y)
             obj = obj.reshape(obj.size)
             flowDict_temp['N'] = N
@@ -795,7 +795,7 @@ class flowField(np.ndarray):
         
         return (pField.view4d()+pCorrection), residuals
         
-    def printCSV(self,xLoc=None, zLoc=None, tLoc=None, yOff=0.,pField=None, interY=2,toFile=True,fName='ff'):
+    def printCSV(self,xLoc=None, zLoc=None, tLoc=None, yLoc=None,yOff=0.,pField=None, interY=2,toFile=True,fName='ff'):
         '''Prints the velocities and pressure in a CSV file with columns ordered as X,Y,Z,U,V,W,P
         Arguments (all keyword):
             xLoc: streamwise locations where field variables need to be computed (default: [0:4*pi/alpha] 41 points)
@@ -805,6 +805,7 @@ class flowField(np.ndarray):
             interY: Field data is interpolated onto interY*self.N points before printing. Default for interY is 2
             yOff: Use this to define wavy surfaces. For flat walls, yOff = 0. For wavy surfaces, yOff = 2*eps
                     yOff is used to modify y-grid as   y[tn,xn,zn] += yOff*cos(alpha*x + beta*z - omega*t)
+            yLoc: Use this to specify a y-grid. When no grid is specified, Chebyshev nodes are used
             fname: Name of CSV file to be printed to. Default: ff.csv 
             toFile: If true, prints field to file. If false, returns the physical field as a 5-d array
                     The 5 dimensions are: (variable, time-location, x-loc, z-loc, y-loc)
@@ -821,6 +822,13 @@ class flowField(np.ndarray):
         if tLoc is None:
             if omega != 0.: tLoc = np.arange(0,2.*np.pi/omega, 2.*np.pi/b/7.)
             else: tLoc = np.zeros(1)
+        if yLoc is None:
+            yLoc = chebdif(interY*self.N,1)[0]
+            yLocFlag = False
+        else:
+            yLocFlag = True
+            assert isinstance(yLoc,np.ndarray) and (yLoc.ndim == 1), 'yLoc must be a 1D numpy array'
+            
         assert type(yOff) is float, 'yOff characterizes surface deformation and must be of type float'
         if '.csv' in fName[-4:]: fName = fName[:-4]
         
@@ -834,24 +842,35 @@ class flowField(np.ndarray):
             assert isinstance(pField, flowField), 'pField must be an instance of flowField class'
             assert pField.size == self.size//3, 'pField must be the same size of each component of self'
         
-        dataArr = np.zeros((7,tLoc.size,xLoc.size,zLoc.size,interY*self.N))
+        dataArr = np.zeros((7,tLoc.size,xLoc.size,zLoc.size,yLoc.size))
         tLoc = tLoc.reshape(tLoc.size,1,1,1)
         xLoc = xLoc.reshape(1,xLoc.size,1,1)
         zLoc = zLoc.reshape(1,1,zLoc.size,1)
         
         if interY != 1:
-            obj = self.slice(M=M, N=interY*self.N)
-            p = pField.slice(M=M, N=interY*self.N).copyArray()
-        else: obj = self.slice(M=M).copy(); p = pField.slice(M=M).copyArray()
-        p = p.reshape(obj.nt,obj.nx,obj.nz,obj.N)
+            obj = self.slice(M=M, N=interY*self.N).copy()
+            p = pField.slice(M=M, N=interY*self.N).copy()
+        else: obj = self.slice(M=M).copy(); p = pField.slice(M=M).copy()
+        p = p.view4d()
         
-        yLoc = chebdif(obj.N,1)[0]
+        if yLocFlag:
+            objTemp = obj.copy(); pTemp = p.copy()
+            tempDict = obj.flowDict; tempDict['N'] = yLoc.size
+            obj = flowField(flowDict=tempDict.copy())
+            tempDict['nd'] = 1; p = flowField(flowDict=tempDict.copy())
+            N1 = obj.N ; N2 = objTemp.N
+            for ind in range(obj.size//obj.N):
+                obj.view1d()[ind*N1:(ind+1)*N1] = chebint(objTemp.view1d()[ind*N2:(ind+1)*N2],yLoc)
+            for ind in range(p.size//p.N):
+                assert isinstance(pTemp, flowField),'pTemp stops being flowField at ind='+str(ind)
+                p.view1d()[ind*N1:(ind+1)*N1] = chebint(pTemp.view1d()[ind*N2:(ind+1)*N2],yLoc)
+        
         yLoc = yLoc.reshape(1,1,1,yLoc.size)
-            
         u = obj.getScalar(nd=0).copyArray().reshape(obj.nt,obj.nx,obj.nz, obj.N)
         v = obj.getScalar(nd=1).copyArray().reshape(obj.nt,obj.nx,obj.nz, obj.N)
         w = obj.getScalar(nd=2).copyArray().reshape(obj.nt,obj.nx,obj.nz, obj.N)
-                
+        p = p.copyArray().reshape(obj.nt,obj.nx,obj.nz, obj.N)
+        
         lArr = (self.flowDict['lOffset']+ np.arange(-L,L+1)).reshape((1,self.nx,1,1))
         mArr = (self.flowDict['mOffset']+ np.arange(M,-M+1)).reshape((1,1,self.nz,1))
         kArr = np.arange(-K,K+1).reshape((self.nt,1,1,1))
