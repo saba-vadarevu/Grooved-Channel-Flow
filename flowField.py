@@ -162,11 +162,11 @@ class flowField(np.ndarray):
         
         if arr is None:
             #obj =  np.zeros((nt,nx,nz,nd,N),dtype=np.complex).view(cls)
-            obj = np.ndarray.__new__(flowField,shape=(nt,nx,nz,nd,N),dtype=np.complex,buffer=np.zeros(nt*nx*nz*nd*N,dtype=np.complex))
+            obj = np.ndarray.__new__(cls,shape=(nt,nx,nz,nd,N),dtype=np.complex,buffer=np.zeros(nt*nx*nz*nd*N,dtype=np.complex))
         else:
             if arr.dtype == np.float:
                 arr = (arr+1.j*np.zeros(arr.shape))
-            obj = np.ndarray.__new__(flowField,shape=(nt,nx,nz,nd,N),dtype=np.complex,buffer=arr)
+            obj = np.ndarray.__new__(cls,shape=(nt,nx,nz,nd,N),dtype=np.complex,buffer=arr)
         
         #print(norm(obj))
         
@@ -184,6 +184,7 @@ class flowField(np.ndarray):
     
     def __array_finalize__(self,obj):
         if self.dtype != np.complex:
+            print('Shape of self that is giving dtype errors:',self.shape)
             warn('flowField class is designed to work with complex array entries\n'+
                  'To obtain real/imaginary parts of an instance, use class methods "real()" and "imag()"')
         if isinstance(obj, flowField):
@@ -509,24 +510,34 @@ class flowField(np.ndarray):
         '''Integrates v*v.conjugate() along x,y,z, and takes its square-root'''
         return np.sqrt(np.abs(self.dot(self)))
     
+    def weighted(self):
+        '''Weights self by sqrt(W), where W is the Clenshaw-Curtis quadrature weighting
+        When using .dot() or .norm(), what is done is W*v1*v2'  
+        Another way to do the same is to pre-multiply vectors v1 and v2 with sqrt(W), 
+            and then use the regular vector dot product to compute the weighted dot product
+        NOTE: In keeping with the convention throughout the class' methods, 
+                the returned object is not a 1-d array. ''' 
+        q = np.sqrt(clencurt(self.N).reshape((1,1,1,1,self.N)))
+        return q*self.view4d()
+    
     def convLinear(self,uBase=None):
         ''' Computes linearized convection term as [U u_x + v U',  U v_x,  U w_x ]
         Baseflow, uBase must be a 1D array of size "N" '''
-        if isinstance(uBase,flowField) and uBase.size != self.N:
-            return self.convSemiLinear(uBase=uBase)
         N = self.N
         y = chebdif(N,1)[0]
-        if uBase is not None:
-            assert uBase.size == N, 'Base flow must be of size N ([U(y),0,0]). For "richer" base flows, use method .convSemiLinear(uBase=baseFlow)'
-        if not isinstance(uBase,flowField): 
+        if isinstance(uBase,flowField):
+            if uBase.size != self.N:
+                return self.convSemiLinear(uBase=uBase)
+        else:
             if uBase is None:
                 if self.flowDict['isPois'] == 1: baseArr = 1.- y**2
                 else: baseArr = y
-            baseDict = defaultBaseDict; baseDict['N'] = N
-            baseArr = uBase
-            uBase = flowField(arr=baseArr, flowDict=baseDict)
-            
-                
+                baseDict = defaultBaseDict; baseDict['N'] = N
+                baseArr = uBase
+                uBase = flowField(arr=baseArr, flowDict=baseDict)
+            else:
+                assert uBase.size == N,\
+                    'Base flow must be of size N ([U(y),0,0]). For "richer" base flows, use method .convSemiLinear(uBase=baseFlow)'
         assert self.nd in [2,3], 'Convection term (linearized) can be calculated only for 2C or 3C vector fields'
         
         convTerm = flowField(flowDict = self.flowDict.copy())
@@ -536,10 +547,20 @@ class flowField(np.ndarray):
         return convTerm
     
     def convSemiLinear(self,uBase=None):
+        '''Use this method when baseFlow is "rich", i.e. not of the form [U_000(y), 0, 0]
+            Any base flow with energy in multiple Fourier modes will lead to dispersion of any fluctuation
+                in modes, say, (k,l,m), to other modes due to the non-linear interaction with modes of the base flow
+        Arguments:
+        uBase: The "rich" base flow. Must be a flowField instance with the same flowDict (except for lOffset and mOffset)
+                as self'''
         if (uBase is None) or (uBase.size == self.N):
             return self.convLinear(uBase=uBase)
         assert isinstance(uBase,flowField), 'The base flow must be an instance of flowField class'
-        assert np.mod(uBase.size,self.nx*self.nz*self.N) == 0., 'The base flow must have the same number of spatial Fourier modes and N as self'
+        assert (uBase.flowDict['K'] == self.flowDict['K']) and \
+                (uBase.flowDict['L'] == self.flowDict['L']) and \
+                (uBase.flowDict['M'] == self.flowDict['M']) and \
+                (uBase.flowDict['N'] == self.flowDict['N']), \
+                'The base flow must have the same number of Fourier and Cheb modes as self'
         assert (uBase.flowDict['alpha'] == self.flowDict['alpha']) and (uBase.flowDict['beta'] == self.flowDict['beta']),\
             'For convSemiLinear, uBase and self should have same fundamental wavenumbers and harmonics (except for offsets in l and m)'
         assert (uBase.flowDict['lOffset'] == 0.) and (uBase.flowDict['mOffset'] == 0.), \
@@ -630,6 +651,8 @@ class flowField(np.ndarray):
                 uBase = 1.-y**2
             else:
                 uBase = y
+        else:
+            print('I have not written code for uBase!=None yet.')
         u[0, L, -M ,0] += uBase
                 
         tempDict = self.flowDict.copy()
@@ -674,7 +697,7 @@ class flowField(np.ndarray):
             convTerm = convTerm.slice(M=self.flowDict['M'])
         return convTerm
         
-    def residuals(self,pField=None, nonLinear=True, divFree=False, uBase=None):
+    def residuals(self,pField=None, nonLinear=True, divFree=False, uBase=None, unsteady=False):
         ''' Computes the residuals of the momentum equations for a velocity field.
         Arguments:
         pField is the pressure field (optional). 
@@ -693,7 +716,7 @@ class flowField(np.ndarray):
             # u_x + v_y + w_z = div. 
             # To ensure divergence is zero, correct 'v' as v += - \int div * dy
             divergence = self.div()
-            divergence[divergence < divTol] = 0.
+            divergence[np.abs(divergence.copyArray()) < divTol] = 0.j
             # vCorrection = -(self.div()).intY()
             self.view4d()[:,:,:,1:2] -= divergence.intY()
         
@@ -702,12 +725,21 @@ class flowField(np.ndarray):
             pField = flowField(flowDict=tempDict)
         else: 
             assert (pField.nd == 1) and (pField.size == np.int(self.size/3)), 'pField should be a scalar of the same size as each scalar of velocity'
-        
         residual[:] += pField.grad() - (1./self.flowDict['Re'])*self.laplacian()
+        residual[:] += self.convLinear(uBase=uBase)
+        '''
         if nonLinear:
-            residual[:] += self.convNL()
+            residual[:] += self.convNL(uBase=uBase)
         else:
-            residual[:] += self.convLinear()
+            if uBase is None:
+                residual[:] += self.convLinear(uBase=uBase)
+            elif uBase.size == self.N: 
+                residual[:] += self.convLinear(uBase=uBase)
+            else:
+                residual[:] += self.convSemiLinear(uBase=uBase)
+        '''
+        if unsteady: 
+            residual[:] += self.ddt()
         
         residual[:,:,:,:,[0,-1]] = self[:,:,:,:,[0,-1]]
         
@@ -728,7 +760,8 @@ class flowField(np.ndarray):
             The residuals of streamwise momentum equation and spanwise momentum equation are averaged to get the actual constant (minimizes the residuals)'''
         
         assert self.nd == 3, 'The flowField instance supplied must be a 3D velocity field'
-        assert isinstance(pField,flowField), 'pField must be a flowField instance'
+        if pField is not None: 
+            assert isinstance(pField,flowField), 'pField must be a flowField instance'
         tempDict = self.flowDict.copy()
         tempDict['nd'] = 1
         pCorrection = flowField(flowDict=tempDict)
@@ -747,13 +780,13 @@ class flowField(np.ndarray):
         else: 
             assert isinstance(residuals,flowField) and (residuals.nd == 3) and (residuals.size == self.size), 'residuals must be a 3D flowField object of the same size as self'
             
-        pCorrection = - (residuals.getScalar(nd=1)).intY()
+        pCorrection = -(residuals.getScalar(nd=1)).intY()
         # pCorrection is now determined upto a constant. Next, find the constant that minimizes residual for streamwise, spanwise
         
         residuals[:,:,:,1:2] += pCorrection.ddy()
         residuals[:,:,:,0:1] += pCorrection.ddx()
         residuals[:,:,:,2:3] += pCorrection.ddz()
-        assert residuals.getScalar(nd=1).norm() < 1.0e-6, 'Wall-normal residual has not gone below 1.0e-6 even after correcting dpdy. Weird'
+        #assert residuals.getScalar(nd=1).norm() < 1.0e-6, 'Wall-normal residual has not gone below 1.0e-6 even after correcting dpdy. Weird'
         
         # (....) + ilap = 0
         # (....) + imbp = 0             a is \alpha, b is \beta, l and m identify Fourier mode
@@ -798,8 +831,8 @@ class flowField(np.ndarray):
     def printCSV(self,xLoc=None, zLoc=None, tLoc=None, yLoc=None,yOff=0.,pField=None, interY=2,toFile=True,fName='ff'):
         '''Prints the velocities and pressure in a CSV file with columns ordered as X,Y,Z,U,V,W,P
         Arguments (all keyword):
-            xLoc: streamwise locations where field variables need to be computed (default: [0:4*pi/alpha] 41 points)
-            zLoc: spanwise locations where field variables need to be computed (default: [0:2*pi/beta] 13 points)
+            xzLoc: wall-parallel locations where field variables need to be computed 
+                    (default: [0:2*pi/alpha] 40 points in x when alpha != 0., [0:2*pi/beta] 20 points in z when beta != 0.)
             tLoc: temporal locations (default: 7 points when omega != 0, 1 when omega = 0). Fields at different time-locations are printed to different files
             pField: Pressure field (computed with divFree=False, nonLinear=True if pField not supplied)
             interY: Field data is interpolated onto interY*self.N points before printing. Default for interY is 2
@@ -813,12 +846,14 @@ class flowField(np.ndarray):
         print('printCSV called.............')
         a = self.flowDict['alpha']; b = self.flowDict['beta']; omega = self.flowDict['omega']
         K = self.flowDict['K']; L = self.flowDict['L']; M=-np.abs(self.flowDict['M'])
+        if (a==0.): 
+            return self.printCSVPlanar(etaLoc=zLoc, tLoc=tLoc, yLoc=yLoc,yOff=yOff,pField=pField, interY=interY,toFile=toFile,fName=fName)
+        if (b==0.): 
+            return self.printCSVPlanar(etaLoc=xLoc, tLoc=tLoc, yLoc=yLoc,yOff=yOff,pField=pField, interY=interY,toFile=toFile,fName=fName)
         if xLoc is None:
-            if a != 0.: xLoc = np.arange(0,4.*np.pi/a, 2.*np.pi/a/20.)
-            else: xLoc = np.zeros(1)
+            xLoc = np.arange(0., 2.*np.pi/a, 2.*np.pi/a/40.)
         if zLoc is None:
-            if b != 0: zLoc = np.arange(0,2.*np.pi/b, 2.*np.pi/b/12.)
-            else: zLoc = np.zeros(1)
+            zLoc = np.arange(0., 2.*np.pi/b, 2.*np.pi/b/20.)
         if tLoc is None:
             if omega != 0.: tLoc = np.arange(0,2.*np.pi/omega, 2.*np.pi/b/7.)
             else: tLoc = np.zeros(1)
@@ -830,11 +865,11 @@ class flowField(np.ndarray):
             assert isinstance(yLoc,np.ndarray) and (yLoc.ndim == 1), 'yLoc must be a 1D numpy array'
             
         assert type(yOff) is float, 'yOff characterizes surface deformation and must be of type float'
-        if '.csv' in fName[-4:]: fName = fName[:-4]
+        if '.dat' in fName[-4:]: fName = fName[:-4]
         
         assert self.nd == 3, 'printCSV() is currently written to handle only 3C velocity fields'
         assert isinstance(xLoc,np.ndarray) and isinstance(zLoc,np.ndarray) and isinstance(tLoc,np.ndarray),\
-            'xLoc and zLoc must be numpy arrays'
+            'xLoc, zLoc, and tLoc must be numpy arrays'
         assert isinstance(fName,str), 'fName must be a string'
         
         if pField is None: pField = self.solvePressure(divFree=False,nonLinear=True)[0]
@@ -862,7 +897,6 @@ class flowField(np.ndarray):
             for ind in range(obj.size//obj.N):
                 obj.view1d()[ind*N1:(ind+1)*N1] = chebint(objTemp.view1d()[ind*N2:(ind+1)*N2],yLoc)
             for ind in range(p.size//p.N):
-                assert isinstance(pTemp, flowField),'pTemp stops being flowField at ind='+str(ind)
                 p.view1d()[ind*N1:(ind+1)*N1] = chebint(pTemp.view1d()[ind*N2:(ind+1)*N2],yLoc)
         
         yLoc = yLoc.reshape(1,1,1,yLoc.size)
@@ -876,7 +910,8 @@ class flowField(np.ndarray):
         kArr = np.arange(-K,K+1).reshape((self.nt,1,1,1))
         
         sumArr = lambda arr: np.sum(np.sum(np.sum(arr,axis=0),axis=0),axis=0).real
-        dataArr[0] = xLoc; dataArr[1] = zLoc; dataArr[2] = yLoc + yOff*np.cos(a*xLoc+b*zLoc-omega*tLoc)
+        dataArr[2] = xLoc; dataArr[1] = zLoc; 
+        dataArr[0] = yLoc + yOff*np.cos(a*xLoc+b*zLoc-omega*tLoc)
         for tn in range(tLoc.size):
             t = tLoc[tn,0,0,0]
             for xn in range(xLoc.size):
@@ -889,14 +924,141 @@ class flowField(np.ndarray):
                     dataArr[6,tn,xn,zn] = sumArr( p * np.exp( 1.j*(lArr*a*x + mArr*b*z - kArr*omega*t) ) )
         
         if toFile:
+            variables = 'VARIABLES = "Y", "Z", "X", "U", "V", "W", "P"\n'
+            zone = 'ZONE T="", I='+str(yLoc.size)+', J='+str(zLoc.size)+', K='+str(xLoc.size)+', DATAPACKING=POINT'
             if tLoc.size == 1:
-                np.savetxt(fName+'.csv', dataArr.reshape((7,dataArr.size//7)).T,delimiter=',')
-                print('Printed physical field to file %s.csv'%fName)
+                #np.savetxt(fName+'.csv', dataArr.reshape((7,dataArr.size//7)).T,delimiter=',')
+                #tempArr = dataArr.reshape(dataArr.size)
+                title = 'TITLE= "Flow in wavy walled channel with a='+str(a)+', b='+str(b)+\
+                    ',Re_{\tau}='+str(self.flowDict['Re'])+'"\n'
+                hdr = title+variables+zone
+                np.savetxt(fName+'.dat',dataArr.reshape(7,dataArr.size//7).T, header=hdr,comments='')
+                print('Printed physical field to file %s.dat'%fName)
             else:
                 for tn in range(tLoc.size):
-                    np.savetxt(fName+str(tn)+'.csv', dataArr[:,tn].reshape((7,dataArr[:,tn].size//7)).T,delimiter=',')
-                print('Printed %d time-resolved physical fields to files %sX.csv'%(tLoc.size,fName))
+                    title = 'TITLE= "Flow in wavy walled channel at t='+str(tLoc[tn,0,0,0])+' with a='+str(a)+', b='+str(b)+\
+                        ',Re_{\tau}='+str(self.flowDict['Re'])+'"\n'
+                    hdr = title+variables+zone
+                    np.savetxt(fName+str(tn)+'.dat', dataArr[:,tn].reshape((7,dataArr[:,tn].size//7)).T,header=hdr,comments='')
+                print('Printed %d time-resolved physical fields to files %sX.dat'%(tLoc.size,fName))
             return
         return dataArr
+    
+    def printCSVPlanar(self,nLoc=40,etaLoc=None, tLoc=None, yLoc=None,yOff=0.,pField=None, interY=2,toFile=True,fName='ffPlanar'):
+        '''Prints flowField on the plane beta*x - alpha*z = 0 (this plane has normal (beta,-alpha)),
+                in coordinate eta := alpha*x + beta*z
+        nLoc: Number of wall-parallel locations (uniform grid is defined along the vector (alpha,beta) 
+            starting at a*x+b*z = 0 and ending at a*x+b*z = 2*pi
+        Refer to printCSV() method's doc-string for description of all other input arguments
+        '''
+        assert (type(nLoc) is int), 'nLoc must be int'
+        a = self.flowDict['alpha']; b = self.flowDict['beta']; omega = self.flowDict['omega']
+        gama = np.sqrt(a*a+b*b)
+        K = self.flowDict['K']; L = self.flowDict['L']; M=-np.abs(self.flowDict['M'])
+        N = np.int(self.N*interY)
+        if etaLoc is None:  etaLoc = np.arange(0., 4.*np.pi/gama, 2.*np.pi/gama/nLoc)
+        else: 
+            assert isinstance(etaLoc,np.ndarray), 'etaLoc must be a numpy array'
+            etaLoc = etaLoc.reshape(etaLoc.size)
+        if (a == 0.) and (b == 0.):
+            warn('Both alpha and beta are zero for the flowField. Printing a field at (x,z)=(0,0)')
+            nLoc=1; etaLoc = np.zeros(1)
+        
+        if tLoc is None:
+            if omega != 0.: tLoc = np.arange(0,2.*np.pi/omega, 2.*np.pi/b/7.)
+            else: tLoc = np.zeros(1)
+        if yLoc is None:
+            yLoc = chebdif(N,1)[0]
+            yLocFlag = False
+        else:
+            yLocFlag = True
+            assert isinstance(yLoc,np.ndarray) and (yLoc.ndim == 1), 'yLoc must be a 1D numpy array'
             
+        assert type(yOff) is float, 'yOff characterizes surface deformation and must be of type float'
+        assert isinstance(fName,str), 'fName must be a string'
+        if '.dat' in fName[-4:]: fName = fName[:-4]
+        
+        assert self.nd == 3, 'printCSV() is currently written to handle only 3C velocity fields'
+        assert isinstance(etaLoc,np.ndarray) and isinstance(tLoc,np.ndarray),\
+            'xLoc, zLoc, and tLoc must be numpy arrays'
+        
+        
+        if pField is None: pField = self.solvePressure(divFree=False,nonLinear=True)[0]
+        else:
+            assert isinstance(pField, flowField), 'pField must be an instance of flowField class'
+            assert pField.size == self.size//3, 'pField must be the same size of each component of self'
+        
+        dataArr = np.zeros((8,tLoc.size,etaLoc.size,yLoc.size))
+        tLoc = tLoc.reshape(tLoc.size,1,1)
+        etaLoc = etaLoc.reshape(1,etaLoc.size,1)
+        
+        if interY != 1:
+            obj = self.slice(M=M, N=interY*self.N).copy()
+            p = pField.slice(M=M, N=interY*self.N).copy()
+        else: obj = self.slice(M=M).copy(); p = pField.slice(M=M).copy()
+        p = p.view4d()
+        
+        if yLocFlag:
+            objTemp = obj.copy(); pTemp = p.copy()
+            tempDict = obj.flowDict; tempDict['N'] = yLoc.size
+            obj = flowField(flowDict=tempDict.copy())
+            tempDict['nd'] = 1; p = flowField(flowDict=tempDict.copy())
+            N1 = obj.N ; N2 = objTemp.N
+            for ind in range(obj.size//obj.N):
+                obj.view1d()[ind*N1:(ind+1)*N1] = chebint(objTemp.view1d()[ind*N2:(ind+1)*N2],yLoc)
+            for ind in range(p.size//p.N):
+                p.view1d()[ind*N1:(ind+1)*N1] = chebint(pTemp.view1d()[ind*N2:(ind+1)*N2],yLoc)
+        
+        yLoc = yLoc.reshape(1,1,yLoc.size)
+        u = obj.getScalar(nd=0).copyArray().reshape(obj.nt,obj.nx,obj.nz, obj.N)
+        v = obj.getScalar(nd=1).copyArray().reshape(obj.nt,obj.nx,obj.nz, obj.N)
+        w = obj.getScalar(nd=2).copyArray().reshape(obj.nt,obj.nx,obj.nz, obj.N)
+        p = p.copyArray().reshape(obj.nt,obj.nx,obj.nz, obj.N)
+        
+        lArr = (self.flowDict['lOffset']+ np.arange(-L,L+1)).reshape((1,self.nx,1,1))
+        mArr = (self.flowDict['mOffset']+ np.arange(M,-M+1)).reshape((1,1,self.nz,1))
+        kArr = np.arange(-K,K+1).reshape((self.nt,1,1,1))
+        
+        print('yOff is set as',yOff)
+        sumArr = lambda arr: np.sum(np.sum(np.sum(arr,axis=0),axis=0),axis=0).real
+        dataArr[1] = etaLoc; 
+        dataArr[0] = yLoc + yOff*np.cos(gama*etaLoc-omega*tLoc)
+        for tn in range(tLoc.size):
+            t = tLoc[tn,0,0]
+            for en in range(etaLoc.size):
+                eta = etaLoc[0,en,0]
+                x = (a/gama)*eta;   z = (b/gama)*eta
+                dataArr[2,tn,en] = sumArr( u * np.exp( 1.j*(lArr*a*x + mArr*b*z - kArr*omega*t) ) )
+                dataArr[3,tn,en] = sumArr( v * np.exp( 1.j*(lArr*a*x + mArr*b*z - kArr*omega*t) ) )
+                dataArr[4,tn,en] = sumArr( w * np.exp( 1.j*(lArr*a*x + mArr*b*z - kArr*omega*t) ) )
+                dataArr[5,tn,en] = sumArr( p * np.exp( 1.j*(lArr*a*x + mArr*b*z - kArr*omega*t) ) )
+        # U_parallel and U_cross:
+        dataArr[6] = a/gama*dataArr[2] + b/gama*dataArr[4]
+        dataArr[7] = -b/gama*dataArr[2]+ a/gama*dataArr[4]
+        
+        if toFile:
+            if 'eps' in self.flowDict: eps = self.flowDict['eps']; g = eps*a
+            else: eps = 1.0E-9; g = 0
+            if a != 0.: theta = int(np.arctan(b/a)*180./np.pi)
+            else: theta = 90
+            variables = 'VARIABLES = "Y", "eta", "U", "V", "W", "P", "U_pl", "U_cr" \n'
+            zoneName = 'T'+str(theta)+'E'+str(-np.log10(eps))+'G'+str(g)+'Re'+str(self.flowDict['Re'])
+            zone = 'ZONE T="'+zoneName+ '", I='+str(yLoc.size)+', J='+str(etaLoc.size)+', DATAPACKING=POINT'
+            if tLoc.size == 1:
+                #np.savetxt(fName+'.csv', dataArr.reshape((7,dataArr.size//7)).T,delimiter=',')
+                #tempArr = dataArr.reshape(dataArr.size)
+                title = 'TITLE= "Flow (planar) in wavy walled channel with a='+str(a)+', b='+str(b)+\
+                    ',Re_{\tau}='+str(self.flowDict['Re'])+'"\n'
+                hdr = title+variables+zone
+                np.savetxt(fName+'.dat',dataArr.reshape(8,dataArr.size//8).T, header=hdr,comments='')
+                print('Printed physical field to file %s.dat'%fName)
+            else:
+                for tn in range(tLoc.size):
+                    title = 'TITLE= "Flow (planar) in wavy walled channel at t='+str(tLoc[tn,0,0])+' with a='+str(a)+', b='+str(b)+\
+                        ',Re_{\tau}='+str(self.flowDict['Re'])+'"\n'
+                    hdr = title+variables+zone
+                    np.savetxt(fName+str(tn)+'.dat', dataArr[:,tn].reshape((8,dataArr[:,tn].size//8)).T,header=hdr,comments='')
+                print('Printed %d time-resolved physical fields to files %sX.dat'%(tLoc.size,fName))
+            return
+        return dataArr
         
