@@ -315,7 +315,7 @@ def chebint (fk, x):
     return p
 
 def chebintegrate(v):
-    ''' Integrates 'v' over Chebyshev nodes, assuming v(1) (or, v[0]) = 0'''
+    ''' Integrates 'v' over Chebyshev nodes, assuming v(y=-1) (or, v[-1]) = 0'''
 
     coeffs = chebcoeffs(v)
     int_coeffs = sp.zeros(v.size, dtype=coeffs.dtype)
@@ -335,5 +335,4 @@ def chebintegrate(v):
     int_coeffs[1:N-1] -= 0.5/nvec[1:N-1]*coeffs[2:]
 
     int_coll_vec = chebcoll_vec(int_coeffs)
-    return int_coll_vec - int_coll_vec[0]
-
+    return int_coll_vec - int_coll_vec[-1]
