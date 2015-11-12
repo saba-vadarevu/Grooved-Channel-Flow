@@ -1,4 +1,3 @@
-
 from flowField import *
 from myUtils import *
 import numpy as np

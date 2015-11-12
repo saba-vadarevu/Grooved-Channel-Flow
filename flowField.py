@@ -12,7 +12,7 @@ import numpy as np
 import scipy as sp
 #from scipy.linalg import norm
 from warnings import warn
-from pseudo import chebdif, clencurt, chebintegrate, chebint
+from pseudo import chebdif, clencurt, chebintegrate, chebint, chebnorm
 #from pseudo.py import chebint
 
 defaultDict = {'alpha':1.14, 'beta' : 2.5, 'omega':0.0, 'L': 23, 'M': 23, 'nd':3,'N': 35, 'K':0,
@@ -204,6 +204,7 @@ class flowField(np.ndarray):
             self.uBase = getattr(self,'uBase',obj.uBase)
             return
         elif obj != None:
+            print('Type of object raising exception is:',type(obj))
             raise RuntimeError('View-casting np.ndarray is not supported since dictionaries cannot be passed. \n'+
                                'To initialize class instance from np.ndarray, use constructor call:flowField(arr=myArray,dictFile=myFile)')
         return
@@ -493,14 +494,14 @@ class flowField(np.ndarray):
         if M > 0: obj = self.slice(M=-M); M=-M
         else: obj = self.copy()
         mArr = np.arange(M, -M+1).reshape((1,1,obj.nz,1,1))
-        mArr[0,-M,0,0,0] = 1.
+        mArr[0,0,-M,0,0] = 1.
         
         integralZ = obj.view4d().copy()/mArr/1.j/b
         integralZ[:,:,-M] -=  np.sum(integralZ, axis=2)
         
         zeroMode = integralZ[:,:,-M]
         if chebnorm(zeroMode.reshape(zeroMode.size),self.N) >= tol :
-            warn("Integral in x cannot be represented by Fourier series if the zero mode has non-zero Fourier coefficient, account for c_0m(y)*x separately")
+            warn("Integral in z cannot be represented by Fourier series if the zero mode has non-zero Fourier coefficient, account for c_0m(y)*z separately")
         integralZ.verify()
         return integralZ.slice(M=self.flowDict['M'])
     
@@ -532,24 +533,35 @@ class flowField(np.ndarray):
                 integratedScalar = scalar.intY()
                 flux = 0.5*integratedScalar.ifft()[0,0]
             else:
+                L = self.flowDict['L']; M = self.flowDict['M']
+                # Zeroth mode cannot be expressed as Fourier mode after integration, so it's accounted for separately
+                zeroMode = scalar.copyArray()[0,L,(abs(M)-M)//2,0]      # Copying zeroth mode 
+                scalar[0,L,(abs(M)-M)//2,0] = 0.                        # Setting rid of zeroth mode
                 integratedScalar = scalar.intY().intZ()
                 lambdaZ = 2.*np.pi/self.flowDict['beta']
                 flux = 0.5/lambdaZ*integratedScalar.ifft(zLoc=lambdaZ)[0,0]
-            if withBase: flux += np.dot(clencurt(self.N),self.uBase)
+                flux += 0.5*np.dot(clencurt(self.N),zeroMode)           # Adding flux due to zeroth mode
+            if withBase: 
+                flux += 0.5*np.dot(clencurt(self.N),self.uBase)
         elif nd == 2:
             # If homogeneous along x, return the integral at x=1., else at x=2*pi/alpha
             if self.flowDict['alpha']== 0.:
                 integratedScalar = scalar.intY()
                 flux = integratedScalar.ifft()[0,0]
             else:
+                L = self.flowDict['L']; M = self.flowDict['M']
+                # Zeroth mode cannot be expressed as Fourier mode after integration, so it's accounted for separately
+                zeroMode = scalar.copyArray()[0,L,(abs(M)-M)//2,0]      # Copying zeroth mode 
+                scalar[0,L,(abs(M)-M)//2,0] = 0.                        # Setting rid of zeroth mode
                 integratedScalar = scalar.intY().intX()
                 lambdaX = 2.*np.pi/self.flowDict['alpha']
                 flux = 0.5/lambdaX*integratedScalar.ifft(xLoc=lambdaX)[0,0]
+                flux += 0.5*np.dot(clencurt(self.N),zeroMode)           # Adding flux due to zeroth mode
         elif nd == 1:
             # I think this follows from divergence-free condition for steady flow. Will derive it later if I need it
             flux = 0.
         else: raise RuntimeError('nd must be 0,1,or 2')
-        return flux
+        return np.real(flux)
     
     def grad(self, scalDim=0, nd=3):
         ''' Computes gradient (in 3d by default) of either a scalar flowField object, 
