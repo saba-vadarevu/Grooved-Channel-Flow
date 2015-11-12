@@ -51,11 +51,10 @@ class flowFieldArray(np.ndarray):
         try:
             propArr = np.asarray([getattr(element,propStr) for element in self.reshape(self.size)])
         except:
-            try:
+            if callable(getattr(self[0,0,0].field,propStr)):
                 propArr = np.asarray([getattr(element.field,propStr)(**kwargs) for element in self.reshape(self.size)])
-            except TypeError: 
+            else: 
                 propArr = np.asarray([getattr(element.field,propStr) for element in self.reshape(self.size)])
-            except: "Attribute doesn't exist for either flowFieldArrayObject or flowFieldWavy"
         return propArr.reshape(self.shape)
         
     
