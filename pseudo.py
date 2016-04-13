@@ -47,8 +47,8 @@ def chebdif(N,M):
 	I = sp.identity(N)		# Identity matrix
 	#L = bool(I)
 
-	n1 = sp.floor(N/2.)		# Indices for flipping trick
-	n2 = sp.ceil(N/2.)
+	n1 = int(sp.floor(N/2.))		# Indices for flipping trick
+	n2 = int(sp.ceil(N/2.))
 
 	k=sp.vstack(sp.linspace(0.,N-1.,N))	# Theta vector
 	th=k*sp.pi/(N-1.)
@@ -138,7 +138,7 @@ def clencurt(n1):
   else:
     n = n1 - 1
     C = sp.zeros((n1,2))
-    k = 2*(1+sp.arange(sp.floor(n/2)))
+    k = 2*(1+sp.arange(int(sp.floor(n/2))))
     C[::2,0] = 2/sp.hstack((1, 1-k*k))
     C[1,1] = -n
     V = sp.vstack((C,sp.flipud(C[1:n,:])))

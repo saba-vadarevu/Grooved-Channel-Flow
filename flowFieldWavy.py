@@ -2,7 +2,11 @@ from flowField import *
 from myUtils import *
 import numpy as np
 import scipy.io as sio
+import os
+import matlab.engine
 
+
+homeFolder = os.environ['HOME']
 def mat2ff(arr=None, **kwargs):
     '''Converts state-vectors from my MATLAB solutions to flowField objects.
         Once a solution is converted to a flowField object, it's .printCSV can be called for visualization.
@@ -29,8 +33,6 @@ def mat2ff(arr=None, **kwargs):
         vField[0,k*xind, k*zind] = arr[k,:3]
         pField[0,k*xind, k*zind] = arr[k,3:]
 
-    # Matlab solutions that I currently have include the base flow in the zeroth mode. So, subtracting for consistency
-    vField[0,tempDict['L'], -tempDict['M'], 0] -= vField.uBase
     
     return vField, pField
 
@@ -72,7 +74,7 @@ def data2ff(fName=None, ind=None):
             epsArr[k] = eps;  gArr[k] = a*eps; ReArr[k] = Re; bArr[k] = b; aArr[k] = a; fnormArr[k] = fnorm
         return vFieldList, pFieldList, {'eps':epsArr, 'g':gArr, 'Re':ReArr, 'a':aArr, 'b': bArr, 'fnorm':fnormArr}
 
-seprnFolderPath = '/home/sabarish/matData/seprn/'
+seprnFolderPath = homeFolder+'/matData/seprn/'
 def mapData2ff(eps=0.01, g= 1.0, Re=100, theta=0):
     """Returns the velocity and pressure flowFields along with parameters (as a dictionary) corresponding to the inputs:
     eps, g, Re, theta (streamwise inclination)
@@ -92,20 +94,27 @@ def mapData2ff(eps=0.01, g= 1.0, Re=100, theta=0):
     #vfList, pfList,paramDict = data2ff(fName=folderPath+fileName,ind=gInd)
     #vf, pf,paramDict = data2ff(fName=folderPath+fileName,ind=3*gInd+ReInd)
     return data2ff(fName=seprnFolderPath+fileName,ind=3*gInd+ReInd)
-    
-MATLABFunctionPath = '/home/sabarish/Dropbox/gitwork/matlab/wavy_newt/3D/'
-MATLABLibraryPath = '/home/sabarish/Dropbox/gitwork/matlab/library/'
-import matlab.engine
-def runMATLAB(g=1.0, eps=0.02, theta=0, Re=100., N=60, n=6):
+
+
+MATLABFunctionPath = homeFolder+'/Dropbox/gitwork/matlab/wavy_newt/3D/'
+MATLABLibraryPath = homeFolder+'/Dropbox/gitwork/matlab/library/'
+def runMATLAB(g=1.0, eps=0.02, theta=0, Re=100., N=60, n=6,multi=False):
+    """ Returns vf, pf, fnorm, flag"""
     eng = matlab.engine.start_matlab()
     eng.addpath(MATLABFunctionPath)
     eng.addpath(MATLABLibraryPath)
-    xList,fnorm,a,b = eng.runFromPy(g,eps,float(theta),Re,float(N),float(n),nargout=4)
-    print('alpha is:',a)
+    if not multi:
+        xList,fnorm,a,b = eng.runFromPy(g,eps,float(theta),Re,float(N),float(n),nargout=4)
+        flg = 0
+    else:
+        Nlim = N; nlim = n
+        N = 40; n = 4
+        xList,fnorm,a,b,N,n,flg = eng.runFromPyMulti(g,eps,float(theta),Re,float(N),float(Nlim),float(n),float(nlim),nargout=7)
+
     x = np.asarray(xList)
     eng.quit()
     vf,pf = mat2ff(arr=x, a=a,b=b,Re=Re,eps=eps,N=N,n=n)
-    return vf,pf,fnorm
+    return vf,pf,fnorm,flg
     
     
 class flowFieldWavy(flowField):
@@ -124,7 +133,13 @@ class flowFieldWavy(flowField):
             assert type(obj.flowDict['eps']) is float, 'eps in flowDict must be of type float'
         obj.verify()
         return obj
-    
+
+#    def __array_finalize__(self,obj):
+        # Supporting view-casting only for flowField instances with 'eps' in their dictionary
+        #if isinstance(obj,flowField): assert ('eps' in obj.flowDict)
+#        return
+        
+
     def verify(self):
         # The only difference, as far as instances are concerned, between flowField and flowFieldWavy
         #   is the flowDict key 'eps'
@@ -132,7 +147,207 @@ class flowFieldWavy(flowField):
             "Key 'eps' is missing, or is not float, in flowDict of flowFieldWavy instance"
         flowField.verify(self)
         return
+
+    def slice(self,**kwargs):
+        """slice method in flowField only returns a flowField instance. So, overriding it to return flowFieldWavy instances here"""
+        return flowField.slice(self,**kwargs)#.view(flowFieldWavy)
+
+    """ Partial derivatives in different coordinate systems:
+        In my regular notes, I use \tilde{x}_i to refer to a 'physical system', and x_i to refer to a 'transformed system'
+        In this code, I deviate from this convention for convenience. 
+            x,y,z refer to the physical system in which the flow happens in a wavy channel
+            X,Y,Z refer to the transformed system where the channel walls are flat
+        All variables are Fourier decomposed along wall-parallel in the transformed system, i.e., in X-Z. 
+
+        Below, d/dX and d/dZ are first defined as l\alpha u, m\beta u and so on... Similarly for d2/dX2 and d2/dZ2
+        d/dx and d/dz are calculated using d/dX, d/dY, and d/dZ as follows:
+            d/dx = d/dX + T_x d/dY 
+            d/dy = d/dY
+            d/dz = d/dZ + T_z d/dZ 
+                where T = y - eps. [ exp{i(\alpha x+ \beta z)} + exp{-i(\alpha x + \beta z)}]
+            T_x = -i eps. \alpha [ exp{i(\alpha x+ \beta z)} - exp{-i(\alpha x + \beta z)}]
+            T_z = -i eps. \beta  [ exp{i(\alpha x+ \beta z)} - exp{-i(\alpha x + \beta z)}]
+
+        When dealing with states, which are collections of Fourier modes, multiplying with, say exp{i l \alpha X},
+            is accomplished by shifting all modes in the state vector by 'l' in the appropriate axis of the state-vector. 
+        For t-modes, X-modes, and Z-modes, these are the zeroth, first, and second axes respectively.
+
+        The assumption for the current implementation is that the wavy channel dictates the size of the periodic box,
+            i.e., the fundamental Fourier mode in the state-vector corresponds to the wavenumber of surface-corrugations
+
+    """ 
+    def ddX(self):
+        ''' Returns a flowFieldWavy instance that gives the partial derivative along "X", the streamwise coordinate in the transformed system '''
+        return flowField.ddx(self) 
     
+    def ddX2(self):
+        ''' Returns a flowFieldWavy instance that gives the second partial derivative along "X" '''
+        return flowField.ddx2(self)
+    
+    def ddZ(self):
+        ''' Returns a flowFieldWavy instance that gives the partial derivative along "Z" '''
+        return flowField.ddz(self)
+    
+    def ddZ2(self):
+        ''' Returns a flowFieldWavy instance that gives the second partial derivative along "Z" '''
+        return flowField.ddz2(self)
+
+    def ddY(self):
+        return self.ddy()
+
+    def ddY2(self):
+        return self.ddy2()
+
+    def __ddxzYcomp(self):
+        """ This will be used in ddx and ddz methods
+            Returns [exp{i(aX+bZ)} - exp{-i(aX+bZ)}] d(field)/dy """
+
+        if self.flowDict['beta'] == 0.: mShift = 0
+        else: mShift = 1
+        if self.flowDict['alpha'] == 0.: lShift = 0
+        else: lShift = 1
+        yComponent = self.copy(); yComponent[:] = 0.
+        partialY = self.ddY()   # d(field)/dY 
+        # Assigning mode '(k,l-1,m-1)' in partialY to mode '(k,l,m)' in yComponent, because that's what multiplying with exp{i(aX+bZ)} does
+        #   But, if say a = 0, then (k,l,m-1) mode in partialY must be assigned to (k,l,m). This is what lShift and mShift are for
+        yComponent[:, lShift:, mShift:] = partialY[:, :self.nx-lShift, :self.nz-mShift]  
+
+        # Subtracting mode (k,l+1,m+1) in partialY from mode (k,l,m) in yComponent (third term in RHS)
+        yComponent[:, :self.nx-lShift, :self.nz-mShift] -= partialY[:, lShift:, mShift:]
+
+        return yComponent
+
+
+    def ddx(self):
+        """ Returns a flowFieldWavy instance that gives the partial derivative along 'x', 
+            the streamwise coordinate in the physical system
+            d(field)/dx = d(field)/dX - i eps. \alpha [exp{i (aX+bZ)} - exp{-i(aX+bZ)}] d(field)/dY"""
+        if self.flowDict['alpha'] != 0.: 
+            yComponent = -1.j*self.flowDict['eps']*self.flowDict['alpha']*self.__ddxzYcomp() 
+            #.ddxzYcomp() calculates the second and third terms in RHS above, without multiplying  -i.eps.alpha
+        else:
+            yComponent = flowFieldWavy(flowDict=self.flowDict) # Zero state-vector 
+
+        return self.ddX() + yComponent
+
+
+    def ddz(self):
+        """ Returns a flowFieldWavy instance that gives the partial derivative along 'z', 
+            the streamwise coordinate in the physical system
+            d(field)/dz = d(field)/dZ - i eps. \beta [exp{i (aX+bZ)} - exp{-i(aX+bZ)}] d(field)/dY"""
+        if self.flowDict['beta'] != 0.: 
+            yComponent = -1.j*self.flowDict['eps']*self.flowDict['beta']*self.__ddxzYcomp() 
+            #.ddxzYcomp() calculates the second and third terms in RHS above, without multiplying  -i.eps.alpha
+        else:
+            yComponent = flowFieldWavy(flowDict=self.flowDict) # Zero state-vector 
+
+        return self.ddZ() + yComponent
+
+    def ddx2(self):
+        """ Returns the second partial derivative along 'x', the streamwise coordinate in the physical system
+            Earlier, I just did d/dx twice. But this gave me results dissimilar to my MATLAB code where I did
+                a proper ddx2, because with the lazy way, I ignore some contributions that I wouldn't with the proper one
+            So, now I do the proper one, given as follows (where C = ax+bz):
+                
+            d_xx(f) = d_XX(f) - 2.i.g.[e^{iC} - e^{-iC}]. d_XY(f) + g.a.[e^{iC} + e^{-iC}].d_Y(f) 
+                        - g.g.[e^{2iC} - 2  + e^{-2iC}]  d_YY(f)
+            Here, x and y are coordinates in the physical system, X and Y are coordinates in the transformed system
+            For ddx and ddz, I used a single routine to calculate some of the terms, but I'm not doing that here,
+                this one seems messier, complicating it would only make it worse
+            """
+        # If L = 0, it means the only mode is the zero mode, and the derivative would be zero
+        if self.nx == 1: return flowFieldWavy(flowDict=self.flowDict)
+        # Initiating as above returns a zero-vector
+        # In initialization, a copy of the supplied flowDict is assigned as the object's attribute
+        eps = self.flowDict['eps']; a=self.flowDict['alpha']; g=eps*a;
+
+        # The first term, d_XX(f) is straight-forward:
+        partialx2 = self.ddX2()
+
+        # Later terms involve multiplying with e^{k.iC}, which is the same as shifting modes by 'k' in the state-vector
+        #   The shift in x-modes is by 'k', but shift in z-modes could be '0' if the state-vector is only resolved in 'x',
+        #       i.e., when M=0. To account for this:
+        if self.flowDict['M'] == 0: mShift = 0
+        else: mShift =1
+
+        # Group the rest of the terms on the first line as follows:
+        #       e^{iC}.[  -2.i.g.d_XY(f) + g.a.d_Y(f) ]  + e^{-iC}.[  2.i.g.d_XY(f)  + g.a.d_Y(f) ]
+        # Step 1: Calculate d_XY(f) and d_Y(f):
+        tempField1 = self.ddX().ddY()
+        tempField2 = self.ddY()
+        
+        # Step 2.1: Add the above fields, multiply by scalars, shift by +1, and add to partialx2
+        sumTemp = -2.j*g*tempField1 + g*a*tempField2
+        partialx2[:, 1:  ,   mShift:       ] += sumTemp[:, :-1 , :self.nz-mShift ]
+        # Step 2.2: As step 2.1, but shift by -1:
+        sumTemp = 2.j*g*tempField1 + g*a*tempField2
+        partialx2[:, :-1 , :self.nz-mShift ] += sumTemp[:, 1:  , mShift:         ]
+
+        # Terms on the second line now. First the 1st and 3rd (the ones with shifts)
+        # Computing the field that needs to be shifted
+        tempField = -g*g*self.ddY2()
+        # Adding the field with appropriate shifts:
+        partialx2[:, 2:  ,   2*mShift:       ] += tempField[:, :-2 , :self.nz-2*mShift ]
+        partialx2[ :, :-2 , :self.nz-2*mShift] += tempField[:, 2:  ,   2*mShift:       ]
+
+        # Finally, adding the term 2*g*g*d_YY(f)
+        partialx2 += -2.*tempField
+        
+        return partialx2
+
+    def ddz2(self):
+        """ Returns the second partial derivative along 'z', the spanwise coordinate in the physical system
+            Earlier, I just did d/dz twice. But this gave me results dissimilar to my MATLAB code where I did
+                a proper ddx2, because with the lazy way, I ignore some contributions that I wouldn't with the proper one
+            So, now I do the proper one, given as follows (where C = ax+bz):
+                
+            d_zz(f) = d_ZZ(f) - 2.i.eps.b.[e^{iC} - e^{-iC}]. d_ZY(f) + eps.b.b.[e^{iC} + e^{-iC}].d_Y(f) 
+                        - eps^2.b^2.[e^{2iC} - 2  + e^{-2iC}]  d_YY(f)
+            Here, x and y are coordinates in the physical system, X and Y are coordinates in the transformed system
+            For ddx and ddz, I used a single routine to calculate some of the terms, but I'm not doing that here,
+                this one seems messier, complicating it would only make it worse
+            """
+        # If M = 0, it means the only mode is the zero mode, and the derivative would be zero
+        if self.nz == 1: return flowFieldWavy(flowDict=self.flowDict)
+        # Initiating as above returns a zero-vector
+        # In initialization, a copy of the supplied flowDict is assigned as the object's attribute
+        eps = self.flowDict['eps']; b=self.flowDict['beta'];
+
+        # The first term, d_ZZ(f) is straight-forward:
+        partialz2 = self.ddZ2()
+
+        # Later terms involve multiplying with e^{k.iC}, which is the same as shifting modes by 'k' in the state-vector
+        #   The shift in z-modes is by 'k', but shift in x-modes could be '0' if the state-vector is only resolved in 'z',
+        #       i.e., when L=0. To account for this:
+        if self.flowDict['L'] == 0: lShift = 0
+        else: lShift =1
+
+        # Group the rest of the terms on the first line as follows:
+        #       e^{iC}.[  -2.i.eps.b.d_ZY(f) + eps.b^2.d_Y(f) ]  + e^{-iC}.[  2.i.eps.b.d_ZY(f)  + eps.b^2.d_Y(f) ]
+        # Step 1: Calculate d_ZY(f) and d_Y(f):
+        tempField1 = self.ddZ().ddY()
+        tempField2 = self.ddY()
+        
+        # Step 2.1: Add the above fields, multiply by scalars, shift by +1, and add to partialz2
+        sumTemp = -2.j*eps*b*tempField1 + eps*b*b*tempField2
+        partialz2[:, lShift:  ,   1:       ] += sumTemp[:, :self.nx-lShift , :-1 ]
+        # Step 2.2: As step 2.1, but shift by -1:
+        sumTemp = 2.j*eps*b*tempField1 + eps*b*b*tempField2
+        partialz2[:, :self.nx-lShift , :-1 ] += sumTemp[:, lShift:  , 1:         ]
+
+        # Terms on the second line now. First the 1st and 3rd (the ones with shifts)
+        # Computing the field that needs to be shifted
+        tempField = -(eps**2)*(b**2)*self.ddY2()
+        # Adding the field with appropriate shifts:
+        partialz2[:, 2*lShift:     , 2:  ] += tempField[:, :self.nx-2*lShift , :-2]
+        partialz2[ :,:self.nx-2*lShift, :-2] += tempField[:, 2*lShift:      , 2:  ]
+
+        # Finally, adding the term 2*g*g*d_YY(f)
+        partialz2 += -2.*tempField
+        
+        return partialz2
+
+   
     def printPhysical(self,**kwargs):
         '''Refer to flowField.printCSV()
         This method sets "yOff" to 2*eps'''
@@ -174,4 +389,24 @@ class flowFieldWavy(flowField):
         n1 = 2.*a*eps*np.sin(a*xLoc+b*zLoc);    n3 = 2.*b*eps*np.sin(a*xLoc+b*zLoc);  n2 = 1.
         nAmp = np.sqrt(n1**2+n2**2+n3**2)
         return (n1/nAmp, n2/nAmp, n3/nAmp)
-    
+   
+def weighted2ff(flowDict=None,arr=None,weights=None):
+    """ Converts 1-d np.ndarray into flowFieldWavy object
+    Inputs:
+        Non-optional: flowDict, arr
+        Optional: weights (Clencurt weights that were used to weight the supplied array)
+    If weights are not supplied, clencurt weights are calculated using 'N' in flowDict
+    But since I wouldn't change 'N' within a GMRES, it's best to calculate the weights once
+        and to keep passing it to the method
+    """
+    assert (flowDict is not None) and (arr is not None), "Both flowDict and arr must be supplied"
+    N = flowDict['N']
+    if weights is None:
+        weights = clencurt(N)
+
+    invRootWeights = (np.sqrt(1./weights)).reshape((1,N))
+    deweightedArr =  invRootWeights * (arr.reshape(arr.size//N, N))
+
+    return flowFieldWavy(flowDict=flowDict, arr= deweightedArr.reshape(arr.size) ) 
+
+

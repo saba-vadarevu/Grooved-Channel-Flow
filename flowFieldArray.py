@@ -61,9 +61,8 @@ class flowFieldArray(np.ndarray):
 class flowFieldArrayObject:
     """Defines an object that contains flowFields, as well as eps,g,alpha,beta,Re as attributes"""
     def __init__(self,field=None):
-        if field is None:
-            self.field=None; self.eps=None; self.g=None; self.a=None; self.b=None; self.Re=None
-        else:
+        self.field=None; self.eps=None; self.g=None; self.a=None; self.b=None; self.Re=None
+        if field is not None:
             self.setField(field)
     
     def setField(self,field):
