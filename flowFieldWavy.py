@@ -148,9 +148,6 @@ class flowFieldWavy(flowField):
         flowField.verify(self)
         return
 
-    def slice(self,**kwargs):
-        """slice method in flowField only returns a flowField instance. So, overriding it to return flowFieldWavy instances here"""
-        return flowField.slice(self,**kwargs)#.view(flowFieldWavy)
 
     """ Partial derivatives in different coordinate systems:
         In my regular notes, I use \tilde{x}_i to refer to a 'physical system', and x_i to refer to a 'transformed system'
@@ -226,7 +223,7 @@ class flowFieldWavy(flowField):
             yComponent = -1.j*self.flowDict['eps']*self.flowDict['alpha']*self.__ddxzYcomp() 
             #.ddxzYcomp() calculates the second and third terms in RHS above, without multiplying  -i.eps.alpha
         else:
-            yComponent = flowFieldWavy(flowDict=self.flowDict) # Zero state-vector 
+            yComponent = self.zero()
 
         return self.ddX() + yComponent
 
@@ -234,12 +231,12 @@ class flowFieldWavy(flowField):
     def ddz(self):
         """ Returns a flowFieldWavy instance that gives the partial derivative along 'z', 
             the streamwise coordinate in the physical system
-            d(field)/dz = d(field)/dZ - i eps. \beta [exp{i (aX+bZ)} - exp{-i(aX+bZ)}] d(field)/dY"""
+            d(field)/dz = d(field)/dZ - i eps. beta [exp{i (aX+bZ)} - exp{-i(aX+bZ)}] d(field)/dY"""
         if self.flowDict['beta'] != 0.: 
             yComponent = -1.j*self.flowDict['eps']*self.flowDict['beta']*self.__ddxzYcomp() 
             #.ddxzYcomp() calculates the second and third terms in RHS above, without multiplying  -i.eps.alpha
         else:
-            yComponent = flowFieldWavy(flowDict=self.flowDict) # Zero state-vector 
+            yComponent = self.zero()
 
         return self.ddZ() + yComponent
 
@@ -256,7 +253,7 @@ class flowFieldWavy(flowField):
                 this one seems messier, complicating it would only make it worse
             """
         # If L = 0, it means the only mode is the zero mode, and the derivative would be zero
-        if self.nx == 1: return flowFieldWavy(flowDict=self.flowDict)
+        if self.nx == 1: return self.zero()
         # Initiating as above returns a zero-vector
         # In initialization, a copy of the supplied flowDict is assigned as the object's attribute
         eps = self.flowDict['eps']; a=self.flowDict['alpha']; g=eps*a;
@@ -308,7 +305,7 @@ class flowFieldWavy(flowField):
                 this one seems messier, complicating it would only make it worse
             """
         # If M = 0, it means the only mode is the zero mode, and the derivative would be zero
-        if self.nz == 1: return flowFieldWavy(flowDict=self.flowDict)
+        if self.nz == 1: return self.zero()
         # Initiating as above returns a zero-vector
         # In initialization, a copy of the supplied flowDict is assigned as the object's attribute
         eps = self.flowDict['eps']; b=self.flowDict['beta'];
@@ -389,6 +386,7 @@ class flowFieldWavy(flowField):
         n1 = 2.*a*eps*np.sin(a*xLoc+b*zLoc);    n3 = 2.*b*eps*np.sin(a*xLoc+b*zLoc);  n2 = 1.
         nAmp = np.sqrt(n1**2+n2**2+n3**2)
         return (n1/nAmp, n2/nAmp, n3/nAmp)
+
    
 def weighted2ff(flowDict=None,arr=None,weights=None):
     """ Converts 1-d np.ndarray into flowFieldWavy object
@@ -409,4 +407,31 @@ def weighted2ff(flowDict=None,arr=None,weights=None):
 
     return flowFieldWavy(flowDict=flowDict, arr= deweightedArr.reshape(arr.size) ) 
 
+class flowFieldRiblet(flowFieldWavy):
+    """Subclass of flowFieldWavy
+    Exclusively for riblet-mounted channels. 
+    In flowFieldWavy, flowDict['alpha'] and flowDict['beta'] gave the size of the periodic box
+        as well as the orientation of the waviness: (alpha*x + beta*z)
+        So, a riblet-mounted geometry also meant that the flow was homogenous in x (since alpha=0)
+    In this subclass, we allow for riblet geometries to be resolved along streamwise, defined
+        by flowDict['alpha'] and flowDict['L']
+    Since there is no streamwise variation in the surface, 
+        We overload methods for differentiation along x, ddx() and ddx2() revert to 
+        flowField.ddx() and flowField.ddx2()"""
+    def __new__(cls,arr=None,flowDict=None,dictFile=None):
+        #obj = flowField.__new__(flowFieldWavy,arr=arr,flowDict=flowDict,dictFile=dictFile)
+        obj = flowField.__new__(cls,arr=arr,flowDict=flowDict,dictFile=dictFile)
+        if 'eps' not in obj.flowDict:
+            warn('flowFieldWavy object does not have key "eps" in its dictionary. Setting "eps" to zero')
+            obj.flowDict['eps'] = 0.
+        else:
+            assert type(obj.flowDict['eps']) is float, 'eps in flowDict must be of type float'
+        obj.verify()
+        return obj
+
+    def ddx(self):
+        return self.ddX()
+
+    def ddx2(self):
+        return self.ddX2()
 

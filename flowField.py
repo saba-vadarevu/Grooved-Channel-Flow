@@ -61,11 +61,6 @@ def read_dictFile(dictFile):
 
     
 
-
-
-
-
-
 class flowField(np.ndarray):
     """
     This module provides a class to define u,v,w (or scalars such as pressure) in 4D: t, x,z,y. 
@@ -157,7 +152,7 @@ class flowField(np.ndarray):
                 raise RuntimeError('The parameters in the dictionary are not consistent with the size of the supplied array')
             if arr.dtype == np.float:
                 arr = (arr+1.j*np.zeros(arr.shape))
-        obj = np.ndarray.__new__(cls,shape=(nt,nx,nz,nd,N),dtype=np.complex,buffer=arr)
+        obj = np.ndarray.__new__(cls,shape=(nt,nx,nz,nd,N),dtype=np.complex,buffer=arr.copy())
         
         obj.flowDict = flowDict.copy()
         obj.nx = nx
@@ -650,7 +645,7 @@ class flowField(np.ndarray):
         convTerm = flowField.__new__(self.__class__,arr=convTerm.reshape(self.size),flowDict=self.flowDict.copy())
         return convTerm
         
-    def residuals(self,pField=None, nonLinear=True, divFree=False):
+    def residuals(self,pField=None, divFree=False):
         """ Computes the residuals of ONLY the momentum equations for a velocity field.
         F(state) =  u_j * partial_j (u_i) + partial_i (p) - 1/Re* partial_jj (u_i) = 0
 
@@ -690,10 +685,7 @@ class flowField(np.ndarray):
         if self.flowDict['isPois'] ==1:
             residual[K,L,M,0] -= 2./self.flowDict['Re']     # adding dP/dx, the mean pressure gradient
 
-        if nonLinear:
-            residual[:] += self.convNL()
-        else:
-            residual[:] += self.convLinear()
+        residual[:] += self.convNL()
 
         vCorrected = self.getScalar(nd=1)
         self.view4d()[:,:,:,1:2] -= vCorrection 
@@ -703,8 +695,8 @@ class flowField(np.ndarray):
 
         # For Couette flow, the BCs on streamwise velocity aren't zero
         if self.flowDict['isPois'] == 0:
-            residual[K,L,M,0,0] += 1. 
-            residual[K,L,M,0,-1] += -1. 
+            residual[K,L,M,0,0] -= 1. 
+            residual[K,L,M,0,-1] -= -1. 
 
         return residual, vCorrected     
     
@@ -1080,6 +1072,11 @@ class flowField(np.ndarray):
         
         return
 
+    def zero(self):
+        """Returns an object of the same class and shape as self, but with zeros as entries"""
+        obj = self.copy()
+        obj[:] = 0.
+        return obj
 
 
     def identity(self):
