@@ -555,7 +555,12 @@ class flowField(np.ndarray):
         assert (self.flowDict == vec2.flowDict), 'Method for inner products is currently unable to handle instances with different flowDicts'
         
         w = clencurt(self.N).reshape((1,1,1,1,self.N))
-        return flowField.__sumAll(self.view4d()*vec2.conjugate().view4d()*w)
+        if self.flowDict['L'] == 0: L_x = 1.
+        else: L_x = 2.*np.pi/self.flowDict['alpha']
+        if self.flowDict['M'] == 0: L_z = 1.
+        else: L_z = 2.*np.pi/self.flowDict['beta']
+
+        return (1./L_x/L_z/2.)*flowField.__sumAll(self.view4d()*vec2.conjugate().view4d()*w)
    
 
     def norm(self):
@@ -576,7 +581,7 @@ class flowField(np.ndarray):
         return ((q*self.view4d()).view1d()).copyArray()
     
     
-    def convNL(self):
+    def convNL(self, fft=True):
         """Computes the non-linear convection term
         Warning: Currently, the code assumes that the flowField supplied is that of a steady flow. Temporal frequencies are not accounted for"""
         
@@ -600,47 +605,55 @@ class flowField(np.ndarray):
         tempDict['nd'] = 3      # Just in case 'self' includes pressure data
         # convTerm = flowField.__new__(self.__class__,flowDict=tempDict).view4d()
         convTerm = self.view4d().copyArray()
+
+        if L*M == 0: fft = False
         
-        ux = u.ddx().copyArray(); uy = u.ddy().copyArray(); uz = u.ddz().copyArray()
-        vx = v.ddx().copyArray(); vy = v.ddy().copyArray(); vz = v.ddz().copyArray()
-        wx = w.ddx().copyArray(); wy = w.ddy().copyArray(); wz = w.ddz().copyArray()
-        u = u.copyArray();  v = v.copyArray();  w = w.copyArray()
-        
-        # We use this function later when computing all contributing pairs of wavenumber vectors 
-        #   to a particular wavenumber vector, such as (3,0),(4,5) contributing to (7,5)
-        sumArr = lambda x: np.sum( x.reshape(self.nt,x.size//self.nt//N,N), axis=1)
-        for lp in range(self.nx//2+1):
-        # for lp in range(self.nx):
-            l = lp - L
-            l1 = l; l2 = None; l3 = None; l4 = l1-1; 
-            if l == 0: l4 = None
-            if l < 0:  
-                l1 = None; l2 = self.nx+l; l3 = l2-1; l4 = None
-                
-            for mp in range(self.nz):
-                m = mp - M
-                m1 = m; m2 = None; m3 = None; m4 = m1-1; 
-                if m == 0: m4 = None
-                if m < 0: 
-                    m1 = None; m2 = self.nz+m; m3 = m2-1; m4 = None
-                # Magic happens here:
-                convTerm[:,lp,mp,0] = sumArr(u[:,l1:l2,m1:m2]*ux[:,l3:l4:-1,m3:m4:-1]
-                                                + v[:,l1:l2,m1:m2]*uy[:,l3:l4:-1,m3:m4:-1]
-                                                + w[:,l1:l2,m1:m2]*uz[:,l3:l4:-1,m3:m4:-1])
-                
-                convTerm[:,lp,mp,1] = sumArr(u[:,l1:l2,m1:m2]*vx[:,l3:l4:-1,m3:m4:-1]
-                                               + v[:,l1:l2,m1:m2]*vy[:,l3:l4:-1,m3:m4:-1]
-                                               + w[:,l1:l2,m1:m2]*vz[:,l3:l4:-1,m3:m4:-1])
-                
-                convTerm[:,lp,mp,2] = sumArr(u[:,l1:l2,m1:m2]*wx[:,l3:l4:-1,m3:m4:-1]
-                                              + v[:,l1:l2,m1:m2]*wy[:,l3:l4:-1,m3:m4:-1]
-                                              + w[:,l1:l2,m1:m2]*wz[:,l3:l4:-1,m3:m4:-1])
-                # Just collecting all wavenumber vectors that add up
-                #   to give (lp,mp), and doing it for u_j * partial_j(u_i)
-                # It might look like should change if we're using wavy walls, but it doesn't,
-                #   because the .ddx(), .ddy(), .ddz() methods of flowFieldWavy class already 
-                #   account for the effects of the coordinate mapping
-        convTerm[0,L+1:] = np.conj(convTerm[0,L-1::-1,::-1])
+        if not fft:
+            ux = u.ddx().copyArray(); uy = u.ddy().copyArray(); uz = u.ddz().copyArray()
+            vx = v.ddx().copyArray(); vy = v.ddy().copyArray(); vz = v.ddz().copyArray()
+            wx = w.ddx().copyArray(); wy = w.ddy().copyArray(); wz = w.ddz().copyArray()
+            u = u.copyArray();  v = v.copyArray();  w = w.copyArray()
+            
+            # We use this function later when computing all contributing pairs of wavenumber vectors 
+            #   to a particular wavenumber vector, such as (3,0),(4,5) contributing to (7,5)
+            sumArr = lambda x: np.sum( x.reshape(self.nt,x.size//self.nt//N,N), axis=1)
+            for lp in range(self.nx//2+1):
+            # for lp in range(self.nx):
+                l = lp - L
+                l1 = l; l2 = None; l3 = None; l4 = l1-1; 
+                if l == 0: l4 = None
+                if l < 0:  
+                    l1 = None; l2 = self.nx+l; l3 = l2-1; l4 = None
+                    
+                for mp in range(self.nz):
+                    m = mp - M
+                    m1 = m; m2 = None; m3 = None; m4 = m1-1; 
+                    if m == 0: m4 = None
+                    if m < 0: 
+                        m1 = None; m2 = self.nz+m; m3 = m2-1; m4 = None
+                    # Magic happens here:
+                    convTerm[:,lp,mp,0] = sumArr(u[:,l1:l2,m1:m2]*ux[:,l3:l4:-1,m3:m4:-1]
+                                                    + v[:,l1:l2,m1:m2]*uy[:,l3:l4:-1,m3:m4:-1]
+                                                    + w[:,l1:l2,m1:m2]*uz[:,l3:l4:-1,m3:m4:-1])
+                    
+                    convTerm[:,lp,mp,1] = sumArr(u[:,l1:l2,m1:m2]*vx[:,l3:l4:-1,m3:m4:-1]
+                                                   + v[:,l1:l2,m1:m2]*vy[:,l3:l4:-1,m3:m4:-1]
+                                                   + w[:,l1:l2,m1:m2]*vz[:,l3:l4:-1,m3:m4:-1])
+                    
+                    convTerm[:,lp,mp,2] = sumArr(u[:,l1:l2,m1:m2]*wx[:,l3:l4:-1,m3:m4:-1]
+                                                  + v[:,l1:l2,m1:m2]*wy[:,l3:l4:-1,m3:m4:-1]
+                                                  + w[:,l1:l2,m1:m2]*wz[:,l3:l4:-1,m3:m4:-1])
+                    # Just collecting all wavenumber vectors that add up
+                    #   to give (lp,mp), and doing it for u_j * partial_j(u_i)
+                    # It might look like should change if we're using wavy walls, but it doesn't,
+                    #   because the .ddx(), .ddy(), .ddz() methods of flowFieldWavy class already 
+                    #   account for the effects of the coordinate mapping
+            convTerm[0,L+1:] = np.conj(convTerm[0,L-1::-1,::-1])
+        else:
+            u = self.getScalar(); v=self.getScalar(nd=1); w=self.getScalar(nd=2)
+            convTerm[0,:,:,0] = _convolve(u,u.ddx()) + _convolve(v,u.ddy()) + _convolve(w,u.ddz())
+            convTerm[0,:,:,1] = _convolve(u,v.ddx()) + _convolve(v,v.ddy()) + _convolve(w,v.ddz())
+            convTerm[0,:,:,2] = _convolve(u,w.ddx()) + _convolve(v,w.ddy()) + _convolve(w,w.ddz())
 
         convTerm = flowField.__new__(self.__class__,arr=convTerm.reshape(self.size),flowDict=self.flowDict.copy())
         return convTerm
@@ -1083,4 +1096,36 @@ class flowField(np.ndarray):
         return self
 
 
+def _convolve(ff1,ff2):
+    """Returns convolution of flowField instances ff1 and ff2 along x and z as a 3d numpy array
+    The assumption here is that they're both in spectral. 
+    Convolution is computed by first doing an ifft of both arrays along axes given by argument axes,
+        the arrays in physical space are multiplied, and the result is then fft'd
+    I use numpy's fft, which is a bit unintuitive. I have to pad ff1 and ff2 before the ifft"""
+    assert (ff1.nd==1) and (ff2.nd==1)
+    assert (ff1.nx >1) and (ff1.nz>1), "This routine only works for objects resolved in both x and z"
+    # Padding with an extra wavenumber on both dimensions, this will be discarded later
+    _f1 = ff1.slice(L=ff1.nx//2+1, M=ff1.nz//2+1)
+    _f2 = ff2.slice(L=ff2.nx//2+1, M=ff2.nz//2+1)
+    
+    # Discarding the last positive modes, because numpy's fft doesn't like it if it was in there
+    _f1 = _f1.view4d().copyArray()
+    _f2 = _f2.view4d().copyArray()
+    _f1 = _f1[0,:-1,:-1,0]
+    _f2 = _f2[0,:-1,:-1,0]
+    
+    # Arranging modes in the order that numpy's fft likes, obtaining array in physical space
+    ph1 = np.fft.ifftn(  np.fft.ifftshift(_f1, axes=[0,1]), axes=[0,1]  )*(_f1.shape[0]*_f1.shape[1])
+    ph2 = np.fft.ifftn(  np.fft.ifftshift(_f2, axes=[0,1]), axes=[0,1]  )*(_f1.shape[0]*_f1.shape[1])
+    
+    # Convolution as product in physical space
+    prod = ph1*ph2
+    
+    # Convolution by fft'ing product, and then shifting to the ordering I like
+    conv = np.fft.fftshift(  np.fft.fftn(prod,axes=[0,1]), axes=[0,1] )/(_f1.shape[0]*_f1.shape[1])
+    
+    # Removing the last negative mode, which I only padded in.
+    conv = conv[1:,1:]
+    
+    return conv      
 
