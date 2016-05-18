@@ -468,7 +468,7 @@ class flowField(np.ndarray):
         """ Integrate each Fourier mode of each scalar along the wall-normal axis
         Returns a flowField object of the same size as self.
         Use this method to compute variables from their wall-normal derivatives"""
-        integral = self.copy().reshape((self.size/self.N, self.N))
+        integral = self.copy().reshape((self.size//self.N, self.N))
         arr = integral.copyArray()
         for n in range(np.int(integral.size/integral.N)):
             integral[n] = chebintegrate(arr[n])
@@ -658,7 +658,7 @@ class flowField(np.ndarray):
         convTerm = flowField.__new__(self.__class__,arr=convTerm.reshape(self.size),flowDict=self.flowDict.copy())
         return convTerm
         
-    def residuals(self,pField=None, divFree=False):
+    def residuals(self,pField=None, divFree=False, **kwargs):
         """ Computes the residuals of ONLY the momentum equations for a velocity field.
         F(state) =  u_j * partial_j (u_i) + partial_i (p) - 1/Re* partial_jj (u_i) = 0
 
@@ -698,7 +698,7 @@ class flowField(np.ndarray):
         if self.flowDict['isPois'] ==1:
             residual[K,L,M,0] -= 2./self.flowDict['Re']     # adding dP/dx, the mean pressure gradient
 
-        residual[:] += self.convNL()
+        residual[:] += self.convNL(**kwargs)
 
         vCorrected = self.getScalar(nd=1)
         self.view4d()[:,:,:,1:2] -= vCorrection 
@@ -713,7 +713,7 @@ class flowField(np.ndarray):
 
         return residual, vCorrected     
     
-    def solvePressure(self, pField=None, residuals=None, divFree=False, nonLinear=True):
+    def solvePressure(self, pField=None, residuals=None, divFree=False):
         """ Solves for pressure, given a 3C velocity field.
             RETURNS TWO FLOWFIELD INSTANCES: The first one is the corrected pField, the second is the residual when the corrected pressure is used
         If pField is supplied, only corrections about this field need to be calculated. The returned field is pField + corrections computed.
@@ -742,7 +742,7 @@ class flowField(np.ndarray):
         
         pCorrection = None
         if residuals is None:
-            residuals = self.residuals(pField=pField, divFree=divFree, nonLinear=nonLinear)
+            residuals = self.residuals(pField=pField, divFree=divFree)[0]
         else: 
             assert (residuals.nd == 3) and (residuals.size == self.size), 'residuals must be a 3D flowField object of the same size as self'
             
@@ -766,8 +766,8 @@ class flowField(np.ndarray):
         a = self.flowDict['alpha']; b = self.flowDict['beta']
         lArr = np.arange(-L, L+1).reshape((1,self.nx,1,1)) 
         lArr[0,L] = 1.   # Avoiding zeros, will account for this later (about 10 lines below)
-        mArr = np.arange( (M-abs(M))/2 , abs(M)+1 ).reshape((1,1,self.nz,1)) 
-        mArr[0,0,-(M-abs(M))/2] = 1.   # Avoiding zeros
+        mArr = np.arange( -M , M+1 ).reshape((1,1,self.nz,1)) 
+        mArr[0,0,M] = 1.   # Avoiding zeros
         
         # Corrections only make sense when la != 0 and mb != 0. So keep entries of constX, constZ as zero when la= 0 or mb=0
         if a != 0.:
@@ -776,14 +776,14 @@ class flowField(np.ndarray):
             constZ[:] = -np.sum( w* (residuals.copyArray()[:,:,:,2]/1.j/mArr/b ), axis=-1)
         
         constX[:,L ]  = 0.
-        constZ[:,:,(abs(M)-M)/2] = 0.
+        constZ[:,:,M] = 0.
         
         const = None
         if a == 0: const = constZ
         elif b==0: const = constX
         else: 
             const = (constX + constZ)/2.
-            const[:,L] += constZ[:,L]/2.; const[:,:,(abs(M)-M)/2] += constX[:,:,(abs(M)-M)/2] 
+            const[:,L] += constZ[:,L]/2.; const[:,:,M] += constX[:,:,M] 
         
         const = const.reshape((self.nt,self.nx,self.nz,1))
         const[const<pCorrTol] = 0.
@@ -843,7 +843,7 @@ class flowField(np.ndarray):
         if L == 0: lArr = np.ones((1,1,1,1,1))
         else:  lArr = np.arange(-L, L+1).reshape((1,self.nx,1,1,1)) 
         if M == 0: mArr = np.ones((1,1,1,1,1))
-        else:  mArr = np.arange( M , abs(M)+1 ).reshape((1,1,obj.nz,1,1)) 
+        else:  mArr = np.arange( M , M+1 ).reshape((1,1,obj.nz,1,1)) 
             
         sumArr = lambda arr: np.sum(np.sum(np.sum(arr,axis=0),axis=0),axis=0).real
         field = sumArr(  self.copyArray()*np.exp(1.j*(a*lArr*xLoc + b*mArr*zLoc - omega*kArr*tLoc))  )

@@ -4,6 +4,7 @@ import numpy as np
 import scipy.io as sio
 import os
 import matlab.engine
+import h5py
 
 
 homeFolder = os.environ['HOME']
@@ -95,6 +96,62 @@ def mapData2ff(eps=0.01, g= 1.0, Re=100, theta=0):
     #vf, pf,paramDict = data2ff(fName=folderPath+fileName,ind=3*gInd+ReInd)
     return data2ff(fName=seprnFolderPath+fileName,ind=3*gInd+ReInd)
 
+def h52ff(fileName,pres=False):
+    """Reads velocity data from h5 file and creates a flowFieldRiblet object out of it
+    NOTE 1: Currently, this function only works for Couette flow equilibria, and possibly for
+        TWS in Poiseuille flow (but 'isPois' in flowDict has to be manually set to 1, 
+            and (-vf.y+1-vf.y**2) must be  added to the zeroth mode)
+        Other solutions might have different resolutions, so the defaults I use here may not work.
+    NOTE 2: The h5 files currently have only velocity data. ChannelFlow has a Poisson solver for pressure,
+        and I have one too. For now, I'll use my own solver. 
+    """
+    if pres: 
+        L = 23; M = 23; nd = 1
+    else: 
+        L = 15; M = 15; nd = 3
+
+    nx = 2*L+2; nz = 2*M+2
+
+    assert fileName[-3:] == ".h5"
+    f = h5py.File(fileName, 'r')
+    u = np.array(f['data']['u'])
+    x = np.array(f['geom']['x'])
+    y = np.array(f['geom']['y'])
+    z = np.array(f['geom']['z'])
+
+    # I order my field-objects as (t, x, z, component, y)
+    # First, reshaping to (x,z,y)
+    uT = np.zeros((nd,nx,nz,35))
+    for k in range(nz):
+        uT[:,:,k] = u[:,:,:,k].reshape((nd,nx,35))
+
+    # FFT, along with a shift to order modes as -L,..,0,1,..,L instead of numpy's default 0,1,..,L,-L,..,-1
+    uSpecArr = np.fft.fftshift(   np.fft.fftn(uT, axes=[1,2]),  axes=[1,2])/nx/nz
+    uSpecArr = uSpecArr[:,1:,1:]    # Numpy's fft returns one extra negative mode, removing that for consistency
+    nx -= 1; nz -= 1
+    if nd == 3:
+        # Reshaping so that the component (u,v,w)  axis is between z and y
+        u1SpecArr = uSpecArr[0].reshape((nx,nz,1,35))
+        u2SpecArr = uSpecArr[1].reshape((nx,nz,1,35))
+        u3SpecArr = uSpecArr[2].reshape((nx,nz,1,35))
+        uSpecFFArr = np.concatenate((u1SpecArr,u2SpecArr,u3SpecArr), axis=2)
+    else: 
+        uSpecFFArr = uSpecArr
+
+    flowDict = getDefaultDict()
+    # The following parameters describe Couette equilibria from Channel flow
+    # For TWS, I must manually change 'isPois' later
+    flowDict.update({'L':L,'M':M,'K':0,'N':35, 'nd':nd, 'eps':0.,'Re':400.,'isPois':0})
+
+    # I can only solve cases of Riblets for equilibria and/or TWS. When eps=0. in flowDict, 
+    #   flowField, flowFieldWavy, and flowFieldRiblet classes all have equivalent methods
+    obj = flowFieldRiblet(flowDict=flowDict, arr=uSpecFFArr.reshape(uSpecFFArr.size))
+    if L != 23:
+        obj = obj.slice(L=23,M=23)  # Padding with extra modes for computation. Gibson's code uses L=M=23 
+    if not pres: obj[0,obj.nx//2, obj.nz//2, 0] += obj.y
+    
+    return obj
+ 
 
 MATLABFunctionPath = homeFolder+'/Dropbox/gitwork/matlab/wavy_newt/3D/'
 MATLABLibraryPath = homeFolder+'/Dropbox/gitwork/matlab/library/'
