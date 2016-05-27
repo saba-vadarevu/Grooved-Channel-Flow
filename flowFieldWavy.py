@@ -491,4 +491,58 @@ class flowFieldRiblet(flowFieldWavy):
 
     def ddx2(self):
         return self.ddX2()
+    
+    def ddz(self):
+        if self.nz == 1:
+            return self.zero()
+        partialZ = self.zero()
+        partialZ += self.ddZ()
+        partialY = self.ddy()
+        gz = self.flowDict['eps'] * self.flowDict['beta']
+
+        partialZ[:,:,1:] += -1.j*gz* partialY[:,:,:-1]
+        partialZ[:,:,:-1]+= 1.j* gz* partialY[:,:,1: ]
+        return partialZ
+    
+    
+    def ddz2(self):
+        # If M = 0, it means the only mode is the zero mode, and the derivative would be zero
+        if self.nz == 1: return self.zero()
+        # Initiating as above returns a zero-vector
+        # In initialization, a copy of the supplied flowDict is assigned as the object's attribute
+        eps = self.flowDict['eps']; b=self.flowDict['beta'];
+
+        # The first term, d_ZZ(f) is straight-forward:
+        partialz2 = self.ddZ2()
+
+        # Later terms involve multiplying with e^{k.iC}, which is the same as shifting modes by 'k' in the state-vector
+        #   The shift in z-modes is by 'k', but shift in x-modes could be '0' if the state-vector is only resolved in 'z',
+        #       i.e., when L=0. To account for this:
+        # Scratch all that, for riblet geometry, no shift in l
+        lShift =0
+
+        # Group the rest of the terms on the first line as follows:
+        #       e^{iC}.[  -2.i.eps.b.d_ZY(f) + eps.b^2.d_Y(f) ]  + e^{-iC}.[  2.i.eps.b.d_ZY(f)  + eps.b^2.d_Y(f) ]
+        # Step 1: Calculate d_ZY(f) and d_Y(f):
+        tempField1 = self.ddZ().ddY()
+        tempField2 = self.ddY()
+        
+        # Step 2.1: Add the above fields, multiply by scalars, shift by +1, and add to partialz2
+        sumTemp = -2.j*eps*b*tempField1 + eps*b*b*tempField2
+        partialz2[:, lShift:  ,   1:       ] += sumTemp[:, :self.nx-lShift , :-1 ]
+        # Step 2.2: As step 2.1, but shift by -1:
+        sumTemp = 2.j*eps*b*tempField1 + eps*b*b*tempField2
+        partialz2[:, :self.nx-lShift , :-1 ] += sumTemp[:, lShift:  , 1:         ]
+
+        # Terms on the second line now. First the 1st and 3rd (the ones with shifts)
+        # Computing the field that needs to be shifted
+        tempField = -(eps**2)*(b**2)*self.ddY2()
+        # Adding the field with appropriate shifts:
+        partialz2[:, 2*lShift:     , 2:  ] += tempField[:, :self.nx-2*lShift , :-2]
+        partialz2[ :,:self.nx-2*lShift, :-2] += tempField[:, 2*lShift:      , 2:  ]
+
+        # Finally, adding the term 2*g*g*d_YY(f)
+        partialz2 += -2.*tempField
+        
+        return partialz2
 
