@@ -55,7 +55,7 @@ def read_dictFile(dictFile):
     with open("flowConfig.txt",'r') as f:
         for line in f:
             (key,val) = line.split()[:2]
-            tempDict[key] = float(val)    
+            tempDict[key] = np.float(val)    
     return tempDict
 
 
@@ -274,7 +274,7 @@ class flowField(np.ndarray):
         
         if (nd is not None):
             nd = np.asarray([nd])
-            nd = nd.reshape(nd.size)
+            nd = nd.flatten()
             obj = obj[:,:,:,nd]
             obj.flowDict['nd'] = nd.size
             obj.nd = nd.size
@@ -555,12 +555,8 @@ class flowField(np.ndarray):
         assert (self.flowDict == vec2.flowDict), 'Method for inner products is currently unable to handle instances with different flowDicts'
         
         w = clencurt(self.N).reshape((1,1,1,1,self.N))
-        if self.flowDict['L'] == 0: L_x = 1.
-        else: L_x = 2.*np.pi/self.flowDict['alpha']
-        if self.flowDict['M'] == 0: L_z = 1.
-        else: L_z = 2.*np.pi/self.flowDict['beta']
 
-        return (1./L_x/L_z/2.)*flowField.__sumAll(self.view4d()*vec2.conjugate().view4d()*w)
+        return (1./2.)*flowField.__sumAll(self.view4d()*vec2.conjugate().view4d()*w)
    
 
     def norm(self):
@@ -658,7 +654,7 @@ class flowField(np.ndarray):
         convTerm = flowField.__new__(self.__class__,arr=convTerm.reshape(self.size),flowDict=self.flowDict.copy())
         return convTerm
         
-    def residuals(self,pField=None, divFree=False, **kwargs):
+    def residuals(self,pField=None, divFree=False,BC=True, **kwargs):
         """ Computes the residuals of ONLY the momentum equations for a velocity field.
         F(state) =  u_j * partial_j (u_i) + partial_i (p) - 1/Re* partial_jj (u_i) = 0
 
@@ -678,16 +674,8 @@ class flowField(np.ndarray):
             to get the residuals instead."""
         assert self.nd == 3, "Method only accepts 3C flowfields, pass pressure using the keyword argument pField"
         tempVec = self.getScalar(nd=1).view4d()
-        residual = self.copy(); residual[:] = 0.
+        residual = self.zero()
         K = self.flowDict['K']; L = self.flowDict['L']; M = self.flowDict['M']; N = self.N
-        vCorrection = self.getScalar(nd=0); vCorrection[:] = 0.
-        if divFree:
-            # u_x + v_y + w_z = div. 
-            # To ensure divergence is zero, correct 'v' as v += - \int div * dy
-            divergence = self.div()
-            divergence[np.abs(divergence.copyArray()) < divTol] = 0.j
-            vCorrection = -divergence.intY()
-            self.view4d()[:,:,:,1:2] += vCorrection
         
         if pField is None:
             pField = self.getScalar(); pField[:] = 0.  
@@ -699,19 +687,17 @@ class flowField(np.ndarray):
             residual[K,L,M,0] -= 2./self.flowDict['Re']     # adding dP/dx, the mean pressure gradient
 
         residual[:] += self.convNL(**kwargs)
-
-        vCorrected = self.getScalar(nd=1)
-        self.view4d()[:,:,:,1:2] -= vCorrection 
         
-        residual[:,:,:,:,[0,-1]] = self[:,:,:,:,[0,-1]]     
-        # Residual at walls is given by the velocities at the walls, this serves as the BC
+        if BC:
+            residual[:,:,:,:,[0,-1]] = self[:,:,:,:,[0,-1]]     
+            # Residual at walls is given by the velocities at the walls, this serves as the BC
 
-        # For Couette flow, the BCs on streamwise velocity aren't zero
-        if self.flowDict['isPois'] == 0:
-            residual[K,L,M,0,0] -= 1. 
-            residual[K,L,M,0,-1] -= -1. 
+            # For Couette flow, the BCs on streamwise velocity aren't zero
+            if self.flowDict['isPois'] == 0:
+                residual[K,L,M,0,0] -= 1. 
+                residual[K,L,M,0,-1] -= -1. 
 
-        return residual, vCorrected     
+        return residual     
     
     def solvePressure(self, pField=None, residuals=None, divFree=False):
         """ Solves for pressure, given a 3C velocity field.
@@ -925,7 +911,7 @@ class flowField(np.ndarray):
             assert isinstance(yLoc,np.ndarray) and (yLoc.ndim == 1), 'yLoc must be a 1D numpy array'
             assert not any(np.abs(yLoc) > 1), 'yLoc must only have points in [-1,1]' 
             
-        assert type(yOff) is float, 'yOff characterizes surface deformation and must be of type float'
+        assert type(yOff) is np.float, 'yOff characterizes surface deformation and must be of type float'
         if '.dat' in fName[-4:]: fName = fName[:-4]
         
         assert self.nd == 3, 'makePhysical() is currently written to handle only 3C velocity fields'
@@ -1011,7 +997,7 @@ class flowField(np.ndarray):
             yLocFlag = True
             assert isinstance(yLoc,np.ndarray) and (yLoc.ndim == 1), 'yLoc must be a 1D numpy array'
             
-        assert type(yOff) is float, 'yOff characterizes surface deformation and must be of type float'
+        assert type(yOff) is np.float, 'yOff characterizes surface deformation and must be of type float'
         assert isinstance(fName,str), 'fName must be a string'
         if '.dat' in fName[-4:]: fName = fName[:-4]
         

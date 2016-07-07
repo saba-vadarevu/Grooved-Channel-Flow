@@ -154,7 +154,7 @@ def chebnorm(vec,N):
 	wvec = clencurt(N)
 	wvec = wvec.reshape((1,N))
 	
-	repN = vect.size/N
+	repN = vect.size//N
 	
 	return sp.sqrt(  abs(sp.dot( sp.tile(wvec,(1,repN)), vect.conjugate()*vect ))[0,0]   )
 
