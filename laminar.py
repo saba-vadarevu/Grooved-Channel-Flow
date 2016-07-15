@@ -63,7 +63,7 @@ def dict2ff(flowDict):
     return vf
 
 def presDrag(pf):
-    """ Returns drag force due to pressure per unit planform area along streamwise and spanwise
+    """ Returns drag force (as a fraction of force due to mean pressure gradient) due to pressure per unit planform area along streamwise and spanwise
     Use presDrag[0] for just the streamwise"""
     lS = 1; mS = 1
     if pf.flowDict['L'] == 0: lS = 0
@@ -71,19 +71,19 @@ def presDrag(pf):
     pWallIm = np.imag(pf.view4d()[0,pf.nx//2-1*lS,pf.nz//2-1*mS,0,-1])
     eps = pf.flowDict['eps']; a = pf.flowDict['alpha']; b = pf.flowDict['beta']
     
-    return np.abs( -4.*eps*a*pWallIm), np.abs( -4.*eps*b*pWallIm) 
+    return np.abs( -4.*eps*a*pWallIm)/4.*pf.flowDict['Re'], np.abs( -4.*eps*b*pWallIm)/4.*pf.flowDict['Re']
 
-def shearStress(vf,seprn=False):
+def shearStress(vf,seprn=False,localDist=False):
     """ Returns drag due to skin friction along streamwise, only for streamwise waviness (currently)
     """
-    assert vf.nz == 0
+    assert vf.nz == 1
     # Refer to documentation to meanings of symbols
     # Building a function that can be handed to scipy.integrate
 
     vfx = vf.ddx().view4d(); vfy = vf.ddy().view4d()
 
     # Arrays for storing the values of Fourier mdoes at the walls
-    uxWall = np.zeros(vf.nx//2 + 1,dtype=np.complex)
+    uxWall = np.zeros(vf.nx,dtype=np.complex)
     uyWall = uxWall.copy()
     vxWall = uxWall.copy()
     vyWall = uxWall.copy()
@@ -93,15 +93,33 @@ def shearStress(vf,seprn=False):
     vxWall[:] = vfx[0,:, 0, 1,-1]
     vyWall[:] = vfy[0,:, 0, 1,-1]
 
-    eps = vf.flowDict['eps']; a = vf.flowDict['alpha']
-    gx = eps*a
+    eps = vf.flowDict['eps']; a = vf.flowDict['alpha']; b = vf.flowDict['beta']
+    gma = np.sqrt(a**2 + b**2)
+    gx = eps*a; gz = eps*b; g = eps*gma
+    K = max(vf.nx, vf.nz)//2
+    kArr = np.arange(-K, K+1).reshape((1,2*K+1))
 
-    lArr = np.arange(-vf.nx//2, vf.nx//2+1)
-    _ifft = lambda x, fArr: np.real( np.sum( fArr * np.exp(1.j*lArr*a*x)) )
- 
-    def _strainRateFun(x,uxw,uyw,vxw,vyw, a,gx):
+    lArr = np.arange(-(vf.nx//2), vf.nx//2+1)
+    def _ifftWall(eta,ffWall):
+        """ Returns value of field 'ff' at the wall when Fourier coefficients
+            at the wall 'ffWall' are supplied. 
+        Inputs:
+            eta: locations in eta, can be array
+            ffWall: coefficients at the wall, organized as -k(a,b),..,(a,b),2(a,b),..,k(a,b)
+        Returns:
+            ffEta, array if eta is input as array
+            """
+        eta = np.array([eta]).flatten()
+        eta = eta.reshape((eta.size,1))
+
+        ffWall = ffWall.reshape((1,2*K+1))
+        ffVals = np.real(np.sum(ffWall*np.exp(1.j*kArr*gma*eta),axis=1))
+        return ffVals.flatten()
+
+    def _strainRateFun(eta,uxw,uyw,vxw,vyw):
         """ Local strain rate, du_t/dn"""
-        sr = 0.
+        eta = np.array([eta]).flatten()
+        sr = np.zeros(eta.shape) 
 
         # Local strain-rate du_t/dn, t: tangential, n:normal coordinate
         # Going from (x,y) to (t,n) involves coordinate rotation, 
@@ -111,51 +129,78 @@ def shearStress(vf,seprn=False):
         # Cij := cij/sqrt( 1 + (2*gx*sin(ax))^2 )  # Refer to documentation for details
         
         # C21*C11*u_x
-        sr += 2.*gx*np.sin(a*x)*_ifft(x,uxw)
+        sr += 2.*g*np.sin(gma*eta)*_ifftWall(eta,uxw)
 
         # C21*C12*v_x
-        sr += -4.*(gx*np.sin(a*x))**2 * _ifft(x,vxw)
+        sr += -4.*(g*np.sin(gma*eta))**2 * _ifftWall(eta,vxw)
 
         # C22*C11*u_y
-        sr += _ifft(x,uyw)
+        sr += _ifftWall(eta,uyw)
 
         # C22*C12*v_y
-        sr += -2.*gx*np.sin(a*x)*_ifft(x,vyw)
+        sr += -2.*g*np.sin(gma*eta)*_ifftWall(eta,vyw)
 
         # Dividing by (1+ (2*gx * sin(ax))^2 )
-        sr *= 1./(1.+ (2.*gx * np.sin(a*x))**2 )
+        sr *= 1./(1.+ (2.*g * np.sin(gma*eta))**2 )
         return sr
 
-    strainRate = lambda x: _strainRateFun(x,uxWall, uyWall, vxWall, vyWall, a, gx)
+    strainRate = lambda eta: _strainRateFun(eta,uxWall, uyWall, vxWall, vyWall)
 
-    Lx = 2.*np.pi/a # Wavelength in x
+    # Lx = 2.*np.pi/a # Wavelength in x
+    # Lz = 2.*np.pi/b
+    Leta = 2.*np.pi/gma
 
     # Integrating du_t/dn * e_t.e_x * ds from x=0 to 2*pi/a:
-    integratedStrainRate = spint.quad(strainRate, 0., Lx, epsabs = 1.0e-07, epsrel=1.0e-04)
+    integratedStrainRate = spint.quad(strainRate, 0., Leta, epsabs = 1.0e-08, epsrel=1.0e-05)[0]
     # e_t.e_x * ds = dx, so don't have to worry about that bit. 
     
     # Times 2, because the force acts on the top surface too. Dividing by 
     #   streamwise wavelength to get the force per unit area (spanwise homogeneous)
-    avgStrainRate = 2.*integratedStrainRate/Lx
+    avgStrainRate = 2.*integratedStrainRate/Leta
     avgShearStress = avgStrainRate/vf.flowDict['Re']    # Follows from non-dimensionalization
     # Refer to documentation
-    stressDict = {'avgStress':avgShearStress}
+    stressDict = {'avgStress':avgShearStress,'avgStressFraction':avgShearStress/4.*vf.flowDict['Re']}
     if  seprn:
-        assert (strainRate(0.) > 0.) and (strainRate(Lx) > 0. )
-        zeroCrossings = roots(strainRate, 0., Lx, eps=Lx/1000.)
-        if len(zeroCrossings) > 2:
-            print("More than two zero crossings detected for local wall shear stress")
-            print("eps, gx:", eps, gx)
-        xSep = None; xReat = None; yBub = None
-        if len(zeroCrossings):
-            xSep = zeroCrossings[0]/Lx      
-            xReat = zeroCrossings[-1]/Lx
-            # Locations of separation and reattachment points are scaled with streamwise wavelength
+        assert (strainRate(0.) > 0.) and (strainRate(Leta) > 0. )
+        etaArr = np.arange(0.,Leta,Leta/100.)
+        coarseStrRate = strainRate(etaArr)
+        # Calculate strain rate at the wall over a coarse grid of 1000 points
+        
+        # Find indices (of etaArr) for the first and last zero crossings of local strain rate
+        negIndArr = np.arange(etaArr.size)[coarseStrRate<=0.]
+        if negIndArr.size > 0:
+            sep0 = etaArr[negIndArr[0]-1]; sep1 = etaArr[negIndArr[0]]
+            reat0 = etaArr[negIndArr[-1]]; reat1 = etaArr[negIndArr[-1]+1]
+            # Separation occurs between etaArr[sepInd0],etaArr[sepInd1],
+            # Reattachment occurs between etaArr[reatInd0],etaArr[reatInd1]
 
-            yBub = 2.*eps*( 0.5*(np.cos(xSep) + np.cos(xReat)) +1.)
+            if ( (negIndArr[-1] - negIndArr[0] +1 ) != negIndArr.size):
+                stressDict.update({'MultipleCrossings':True})
+            else:
+                stressDict.update({'MultipleCrossings':False})
+            
+            # I'm not using a binary search- it's pointless,
+            #   It's faster to do ifft and stuff with arrays, 
+            #   and even if I use a binary search to do a binary search
+            #   I can't say the result is physically valid since I use
+            #   only a few Fourier modes
+            sepArr = np.arange(sep0,sep1,(sep1-sep0)/100.)
+            reatArr = np.arange(reat0,reat1,(reat1-reat0)/100.)
+
+            sepStrRate = strainRate(sepArr)
+            reatStrRate = strainRate(reatArr)
+
+            sepNegIndArr = np.arange(sepArr.size)[sepStrRate<=0.]
+            reatPosIndArr = np.arange(reatArr.size)[reatStrRate>=0.] 
+            xSep = sepArr[sepNegIndArr[0]]/Leta
+            xReat = reatArr[reatPosIndArr[0]]/Leta
+
+            yBub = ( 0.5*(np.cos(2.*np.pi*xSep) + np.cos(2.*np.pi*xReat)) +1.)/2.
             # Height of bubble approximated as average of height of separation and reattachment
             #   points measured from the bottom of furrows
-        stressDict.update({'xSep':xSep, 'xReat':xReat,'xBub':xReat-xSep,'yBub':yBub})
+        else:
+            xSep = None; xReat=None; yBub=None
+        stressDict.update({'xSep':xSep, 'xReat':xReat,'yBub':yBub})
     return stressDict
 
 

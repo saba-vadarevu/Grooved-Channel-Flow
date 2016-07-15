@@ -150,7 +150,7 @@ class flowField(np.ndarray):
         else:
             if arr.size != (nx*nz*nt*nd*N):
                 raise RuntimeError('The parameters in the dictionary are not consistent with the size of the supplied array')
-            if arr.dtype == np.float:
+            if arr.dtype == np.float or (arr.dtype == np.float64):
                 arr = (arr+1.j*np.zeros(arr.shape))
         obj = np.ndarray.__new__(cls,shape=(nt,nx,nz,nd,N),dtype=np.complex,buffer=arr.copy())
         
@@ -911,7 +911,7 @@ class flowField(np.ndarray):
             assert isinstance(yLoc,np.ndarray) and (yLoc.ndim == 1), 'yLoc must be a 1D numpy array'
             assert not any(np.abs(yLoc) > 1), 'yLoc must only have points in [-1,1]' 
             
-        assert type(yOff) is np.float, 'yOff characterizes surface deformation and must be of type float'
+        assert (type(yOff) is np.float) or (type(yOff) is np.float64), 'yOff characterizes surface deformation and must be of type float'
         if '.dat' in fName[-4:]: fName = fName[:-4]
         
         assert self.nd == 3, 'makePhysical() is currently written to handle only 3C velocity fields'
@@ -997,7 +997,7 @@ class flowField(np.ndarray):
             yLocFlag = True
             assert isinstance(yLoc,np.ndarray) and (yLoc.ndim == 1), 'yLoc must be a 1D numpy array'
             
-        assert type(yOff) is np.float, 'yOff characterizes surface deformation and must be of type float'
+        assert type(yOff) is np.float or (type(yOff) is np.float64), 'yOff characterizes surface deformation and must be of type float'
         assert isinstance(fName,str), 'fName must be a string'
         if '.dat' in fName[-4:]: fName = fName[:-4]
         

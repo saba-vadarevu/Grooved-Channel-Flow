@@ -14,7 +14,7 @@ def mat2ff(arr=None, **kwargs):
     All parameters are keyword-parameters: arr (state-vec), a,b,eps,Re,N,n'''
     assert isinstance(arr,np.ndarray), 'A numpy array must be passed as the state-vector using keyword "arr"'
     assert set(['a','b','Re','N','eps','n']).issubset(kwargs), 'a,b,Re,eps,N, and n must be supplied as keyword arguments'
-    assert all((type(kwargs[k]) is np.float) or (type(kwargs[k]) is int) for k in kwargs)
+    # assert all((type(kwargs[k]) is np.float) or (type(kwargs[k]) is int) for k in kwargs)
     tempDict = {'alpha':kwargs['a'],   'beta' : kwargs['b'], 'omega':0.0,   'K':0, \
                 'L': abs(int(kwargs['n'])), 'M': -abs(int(kwargs['n'])),  'nd':3,  'N': abs(int(kwargs['N'])), \
                 'Re': kwargs['Re'], 'isPois':1,  'eps': kwargs['eps'], \
@@ -49,8 +49,8 @@ def data2ff(fName=None, ind=None):
     if (ind is not None) and (type(ind) is int):
         matArr = dataStruct[ind,0].X
         params = dataStruct[ind,0].Param; params=params.reshape(params.size)
-        a=np.float(params[0]);b=np.float(params[1]); eps=np.float(params[2]); Re=np.float(params[4]); N=int(params[5]); n=int(params[6])
-        g = a*eps;  fnorm = np.float(params[-1])
+        a=np.float64(params[0]);b=np.float64(params[1]); eps=np.float64(params[2]); Re=np.float64(params[4]); N=int(params[5]); n=int(params[6])
+        g = a*eps;  fnorm = np.float64(params[-1])
         if fnorm > 1.0e-5: 
             warn('Residual norm for the case is quite large and the solution cannot be trusted. Initializing a zero flowfield')
             matArr = np.zeros(matArr.shape, dtype=np.complex)
@@ -64,8 +64,8 @@ def data2ff(fName=None, ind=None):
         for k in range(nCases):
             matArr = dataStruct[k,0].X
             params = dataStruct[k,0].Param; params=params.reshape(params.size)
-            a=np.float(params[0]);b=np.float(params[1]); eps=np.float(params[2]); Re=np.float(params[4]); N=int(params[5]); n=int(params[6])
-            g = a*eps;  fnorm = np.float(params[-1])
+            a=np.float64(params[0]);b=np.float64(params[1]); eps=np.float64(params[2]); Re=np.float64(params[4]); N=int(params[5]); n=int(params[6])
+            g = a*eps;  fnorm = np.float64(params[-1])
             if fnorm > 1.0e-5: 
                 warn('Residual norm for the case is quite large and the solution cannot be trusted. Initializing a zero flowfield')
                 matArr = np.zeros(matArr.shape, dtype=np.complex)
@@ -174,8 +174,12 @@ def dict2name(flowDict,prefix='solutions/'):
     clsName=''
     if flowDict['beta'] == 0.:
         theta = '00'
+    elif flowDict['alpha'] == 0.:
+        theta = '90'
     else:
         theta = '%02d' %(int( 180./np.pi* np.arctan(flowDict['beta']/flowDict['alpha'])   ))
+
+    assert flowDict['eps'] == round(flowDict['eps'],4)
     
     epsilon = '%04d' %(int( round(flowDict['eps']*1.0e4)))
     slopeX = '%04d' %(int( round(flowDict['alpha']*flowDict['eps']*1.0e3)))
@@ -206,11 +210,11 @@ def name2dict(fName):
     flowDict['N'] = int(fName[-2:])
     flowDict['M'] = int(fName[-5:-3])
     flowDict['L'] = int(fName[-8:-6])
-    flowDict['Re'] = np.float(fName[-13:-9])
+    flowDict['Re'] = np.float64(fName[-13:-9])
     
-    gz = np.float( fName[-19:-15] )/1000.
-    gx = np.float( fName[-25:-21] )/1000.
-    flowDict['eps'] = np.float( fName[-31:-27] )/10000.
+    gz = np.float64( fName[-19:-15] )/1000.
+    gx = np.float64( fName[-25:-21] )/1000.
+    flowDict['eps'] = np.float64( fName[-31:-27] )/10000.
     
     try:
         flowDict['alpha'] = gx/flowDict['eps']
@@ -229,9 +233,10 @@ def saveff(vf,pf,prefix='solutions/'):
     x = vf.appendField(pf)
     xArr = x.view1d().copyArray()
     np.save(fName,xArr)
+    print('saved to ',fName)
     return
 
-def loadff(fName):
+def loadff(fName,prefix='',checkNorm=False):
     flowDict = name2dict(fName)
     if not fName.endswith('.npy'):
         fName = fName + '.npy'
@@ -239,6 +244,13 @@ def loadff(fName):
     x = flowFieldWavy(flowDict=flowDict, arr=xArr)
     vf = x.slice(nd=[0,1,2])
     pf = x.getScalar(nd=3)
+    if checkNorm:
+        ls = 0; ms = 0
+        if vf.nx != 0: ls = 1
+        if vf.nz != 0: ms = 1
+        res = vf.slice(L=vf.nx//2+2*ls, M=vf.nz//2+2*ms).residuals(pField=pf.slice(L=pf.nx//2+2*ls, M=pf.nz//2+2*ms))
+        assert res.slice(L=vf.nx//2,M=vf.nz//2).norm() <= 1.0e-12
+
     return vf,pf
  
 
@@ -250,14 +262,14 @@ def runMATLAB(g=1.0, eps=0.02, theta=0, Re=100., N=60, n=6,multi=False,tol=1.0e-
     eng.addpath(MATLABFunctionPath)
     eng.addpath(MATLABLibraryPath)
     if not multi:
-        xList,fnorm,a,b = eng.runFromPy(g,eps,np.float(theta),Re,np.float(N),np.float(n),np.float(tol),nargout=4)
+        xList,fnorm,a,b = eng.runFromPy(g,eps,np.float64(theta),Re,np.float64(N),np.float64(n),np.float64(tol),nargout=4)
         flg = 0
     else:
         Nlim = N; nlim = n
         N = 40; n = 4
-        xList,fnorm,a,b,N,n,flg = eng.runFromPyMulti(g,eps,np.float(theta),Re,np.float(N),np.float(Nlim),np.float(n),np.float(nlim),np.float(tol),nargout=7)
+        xList,fnorm,a,b,N,n,flg = eng.runFromPyMulti(g,eps,np.float64(theta),Re,np.float64(N),np.float64(Nlim),np.float64(n),np.float64(nlim),np.float64(tol),nargout=7)
 
-    x = np.asarray(xList); fnorm = np.asarray(np.float64(fnorm)).flatten()
+    x = np.asarray(xList); fnorm = np.asarray(np.float6464(fnorm)).flatten()
     N=int(N); n=int(n); flg=int(flg)
     eng.quit()
     vf,pf = mat2ff(arr=x, a=a,b=b,Re=Re,eps=eps,N=N,n=n)
@@ -277,7 +289,7 @@ class flowFieldWavy(flowField):
             warn('flowFieldWavy object does not have key "eps" in its dictionary. Setting "eps" to zero')
             obj.flowDict['eps'] = 0.
         else:
-            assert type(obj.flowDict['eps']) is np.float, 'eps in flowDict must be of type float'
+            assert type(obj.flowDict['eps']) is np.float64 or (type(obj.flowDict['eps']) is np.float), 'eps in flowDict must be of type float'
         obj.verify()
         return obj
 
@@ -290,7 +302,7 @@ class flowFieldWavy(flowField):
     def verify(self):
         # The only difference, as far as instances are concerned, between flowField and flowFieldWavy
         #   is the flowDict key 'eps'
-        assert ('eps' in self.flowDict) and (type(self.flowDict['eps']) is np.float),\
+        assert (type(self.flowDict['eps']) is np.float64) or (type(self.flowDict['eps']) is np.float),\
             "Key 'eps' is missing, or is not float, in flowDict of flowFieldWavy instance"
         flowField.verify(self)
         return
@@ -516,7 +528,6 @@ class flowFieldWavy(flowField):
         # Given direcXZ = (d1,d3), the y-component (d2) is obtained as  d2 = -(n1*d1 + n3*d3)/n2 = -(n1*d1+n3*d3)
         d1 = direcXZ[0]; d3 = direcXZ[1]
         a = self.flowDict['alpha']; b = self.flowDict['beta']; eps = self.flowDict['eps']
-        assert (type(xLoc) is np.float) and (type(zLoc) is np.float), "Arguments xLoc and zLoc must be of type float"
         n1 = 2.*a*eps*np.sin(a*xLoc+b*zLoc);    n3 = 2.*b*eps*np.sin(a*xLoc+b*zLoc)
         
         d2 = -(n1*d1 + n3*d3)
@@ -572,7 +583,7 @@ class flowFieldRiblet(flowFieldWavy):
             warn('flowFieldWavy object does not have key "eps" in its dictionary. Setting "eps" to zero')
             obj.flowDict['eps'] = 0.
         else:
-            assert type(obj.flowDict['eps']) is np.float, 'eps in flowDict must be of type float'
+            assert type(obj.flowDict['eps']) is np.float64 or (type(obj.flowDict['eps']) is np.float), 'eps in flowDict must be of type float'
         obj.verify()
         return obj
 
