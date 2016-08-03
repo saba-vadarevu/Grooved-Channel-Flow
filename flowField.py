@@ -401,9 +401,9 @@ class flowField(np.ndarray):
             return integralX
 
         L = self.flowDict['L']
-        lArr = lOffset+np.arange(-L, L+1).reshape((1,self.nx,1,1,1))
+        lArr = self.flowDict['lOffset']+np.arange(-L, L+1).reshape((1,self.nx,1,1,1))
         #lArr has a zero, setting that to 1 for now (because I'll divide by lArr in a bit)
-        zeroInd = np.squeeze(np.argwhere(lArr==0)) # If an 'l' is zero, set it to 1 in lArr
+        zeroInd = np.squeeze(np.argwhere(lArr==0))[2] # If an 'l' is zero, set it to 1 in lArr
         lArr[0,zeroInd,0,0,0] = 1.
         
         integralX = self.view4d().copy()/lArr/1.j/a
@@ -442,9 +442,9 @@ class flowField(np.ndarray):
             return integralZ
 
         M = self.flowDict['M']
-        mArr = mOffset+np.arange(-M, M+1).reshape((1,1,self.nz,1,1))
+        mArr = self.flowDict['mOffset']+np.arange(-M, M+1).reshape((1,1,self.nz,1,1))
         #mArr may have a zero, setting that to 1 for now (because I'll divide by mArr in a bit)
-        zeroInd = np.squeeze(np.argwhere(mArr==0)) # If an 'l' is zero, set it to 1 in lArr
+        zeroInd = np.squeeze(np.argwhere(mArr==0))[2] # If an 'l' is zero, set it to 1 in lArr
         mArr[0,0,zeroInd,0,0] = 1.
         
         integralZ = self.view4d().copy()/mArr/1.j/b
@@ -483,35 +483,32 @@ class flowField(np.ndarray):
             Return, say for nd=0:  1/lambda_z *\int_(z=0)^(z=lambda_z)   0.5* \int_(y=-1)^(y=1)  scalar* dy * dz
             """
         scalar = self.getScalar(nd=nd)
+        weights = clencurt(self.N)
         if nd == 0:
-            # .intY() and .intZ() give definite integrals with integrals being zero at y=-1 and z=0 respectively
-            # If homogeneous along z, integrate only along Y and not Z, else integrate along z to z=2*pi/beta
-            if self.flowDict['beta']== 0.:
-                integratedScalar = scalar.intY()
-                flux = 0.5*integratedScalar.ifft()[0,0]
-            else:
-                L = self.flowDict['L']; M = self.flowDict['M']
-                # Zeroth mode cannot be expressed as Fourier mode after integration, so it's accounted for separately
-                zeroMode = scalar.copyArray()[0,L,M,0]      # Copying zeroth mode 
-                scalar[0,L,M,0] = 0.                        # Getting rid of zeroth mode
-                integratedScalar = scalar.intY().intZ()
-                lambdaZ = 2.*np.pi/self.flowDict['beta']
-                flux = 0.5/lambdaZ*integratedScalar.ifft(zLoc=lambdaZ)[0,0]
-                flux += 0.5*np.dot(clencurt(self.N),zeroMode)           # Adding flux due to zeroth mode
+            L = self.flowDict['L']; M = self.flowDict['M']
+            zeroModes = scalar.copyArray()[0,:,M,0]      
+            # When integrating along z, only the modes with m=0 contribute to the volume flux
+
+            #zeroModes is of shape (nz,N)
+            # To integrate along y, a matrix product of zeroModes with weights as a column vector works
+            weights = weights.reshape((self.N,1))
+            integrateY = np.dot(zeroModes,weights)      # This is an array of shape (nz,1)
+            flux = 0.5*np.sum(integrateY,axis=0)
+            # Sum along axis 0 because all x-modes have to be added up, 
+            # multiply with 0.5 because Y-domain length is 2
+
         elif nd == 2:
-            # If homogeneous along x, return the integral at x=1., else at x=2*pi/alpha
-            if self.flowDict['alpha']== 0.:
-                integratedScalar = scalar.intY()
-                flux = integratedScalar.ifft()[0,0]
-            else:
-                L = self.flowDict['L']; M = self.flowDict['M']
-                # Zeroth mode cannot be expressed as Fourier mode after integration, so it's accounted for separately
-                zeroMode = scalar.copyArray()[0,L,(abs(M)-M)//2,0]      # Copying zeroth mode 
-                scalar[0,L,(abs(M)-M)//2,0] = 0.                        # Setting rid of zeroth mode
-                integratedScalar = scalar.intY().intX()
-                lambdaX = 2.*np.pi/self.flowDict['alpha']
-                flux = 0.5/lambdaX*integratedScalar.ifft(xLoc=lambdaX)[0,0]
-                flux += 0.5*np.dot(clencurt(self.N),zeroMode)           # Adding flux due to zeroth mode
+            L = self.flowDict['L']; M = self.flowDict['M']
+            zeroModes = scalar.copyArray()[0,L,:,0]      
+            # When integrating along z, only the modes with m=0 contribute to the volume flux
+
+            #zeroModes is of shape (nx,N)
+            # To integrate along y, a matrix product of zeroModes with weights as a column vector works
+            weights = weights.reshape((self.N,1))
+            integrateY = np.dot(zeroModes,weights)      # This is an array of shape (nz,1)
+            flux = 0.5*np.sum(integrateY,axis=0)
+            # Sum along axis 0 because all x-modes have to be added up, 
+            # multiply with 0.5 because Y-domain length is 2
         elif nd == 1: pass
             # I think this follows from divergence-free condition for steady flow. Will derive it later if I need it flux = 0.
         else: raise RuntimeError('nd must be 0,1,or 2')
@@ -820,16 +817,13 @@ class flowField(np.ndarray):
         a = self.flowDict['alpha']; b = self.flowDict['beta']; omega = self.flowDict['omega']
         K = self.flowDict['K'];  L = self.flowDict['L']; M = self.flowDict['M']
 
-        if M > 0: 
-            obj = self.slice(M=-M); M = -M
-        else: obj = self
 
         if K == 0: kArr = np.ones((1,1,1,1,1))
         else: kArr = np.arange(-K, K+1).reshape((self.nt,1,1,1,1)) 
         if L == 0: lArr = np.ones((1,1,1,1,1))
         else:  lArr = np.arange(-L, L+1).reshape((1,self.nx,1,1,1)) 
         if M == 0: mArr = np.ones((1,1,1,1,1))
-        else:  mArr = np.arange( M , M+1 ).reshape((1,1,obj.nz,1,1)) 
+        else:  mArr = np.arange( -M , M+1 ).reshape((1,1,self.nz,1,1)) 
             
         sumArr = lambda arr: np.sum(np.sum(np.sum(arr,axis=0),axis=0),axis=0).real
         field = sumArr(  self.copyArray()*np.exp(1.j*(a*lArr*xLoc + b*mArr*zLoc - omega*kArr*tLoc))  )
@@ -850,9 +844,6 @@ class flowField(np.ndarray):
         
         # Ensure that Fourier modes for the full x-z plane are available, not just the half-plane (m>=0)
         M = self.flowDict['M']
-        if M > 0: 
-            obj = self.slice(M=-M); M = -M
-        else: obj = self
             
         if yLoc is None:
             field = np.zeros((tLoc.size, xLoc.size, zLoc.size, self.nd, self.N))

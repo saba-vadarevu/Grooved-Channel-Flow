@@ -37,6 +37,12 @@ def mat2ff(arr=None, **kwargs):
     
     return vField, pField
 
+def updateDict(dict1,dict2):
+    tempDict = dict1.copy()
+    tempDict.update(dict2)
+    return tempDict
+
+
 def data2ff(fName=None, ind=None):
     '''Reads a datafile with name fName. 
     Returns vField, pField, dict (containing a,b,g,eps, Re,fnorm)'''
@@ -151,6 +157,22 @@ def h52ff(fileName,pres=False):
     if not pres: obj[0,obj.nx//2, obj.nz//2, 0] += obj.y
     
     return obj
+
+def loadh5(filename):
+    """Loads hdf5 files that I write for my flowFieldRiblet solutions
+    For loading solutions from channelflow.org, use h52ff()
+    Input:
+        filename"""
+    inFile = h5py.File(filename,"r")
+    field = inFile['field']
+    tempDict = {}
+    for key in field.attrs:
+        tempDict[key] = field.attrs[key]
+    tempDict['nd']=4    # Solution field must include a pressure field
+    ff = flowFieldRiblet(arr=np.array(field), flowDict=tempDict)
+    inFile.close()
+    return ff
+
 
 # Standardizing names of flowField files 
 def dict2name(flowDict,prefix='solutions/'):
@@ -646,4 +668,32 @@ class flowFieldRiblet(flowFieldWavy):
         partialz2 += -2.*tempField
         
         return partialz2
+    
+
+    def saveh5(self,fNamePrefix='ribEq1',prefix='solutions/ribEq/'):
+        """ Saves self to a hdf5 file
+        Input:
+            fNamePrefix (None): prefix to file name, such as LBeq1
+            prefix ('solutions/'): Path prefix
+        Name of hdf5 file is fNamePrefix+prefix+'LxMxNxExxxx.hdf5'
+        """
+        fName = 'L'+str(self.flowDict['L'])+'M'+str(self.flowDict['M'])+'N'+str(self.flowDict['N'])
+        fName = fName + 'E'+ '%04d' %(int( round(self.flowDict['eps']*1.0e4))) + '.hdf5'
+
+        fName = prefix + fNamePrefix + fName
+
+        outFile = h5py.File(fName, "w")
+        assert self.nd == 4, "Save flowFields that include a pressure field"
+
+        field = outFile.create_dataset("field",data=self.flatten(),compression='gzip')
+
+        for key in self.flowDict:
+            field.attrs[key] = self.flowDict[key]
+        print("saved field to ",fName)
+        outFile.close()
+        return
+
+
+
+
 

@@ -9,11 +9,6 @@ pres0BC = False
 linTol = 1.0e-12
 tol0 = 1.0e-14  # Tolerance to use for comparing numbers to zero
 
-def updateDict(dict1,dict2):
-    tempDict = dict1.copy()
-    tempDict.update(dict2)
-    return tempDict
-
 def ff2arr(ff):
     """
     Convert flowField object into a 1d numpy array
