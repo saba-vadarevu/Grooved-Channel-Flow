@@ -850,8 +850,8 @@ class flowField(np.ndarray):
             for tn in range(tLoc.size):
                 for xn in range(xLoc.size):
                     for zn in range(zLoc.size):
-                        field[tn,xn,zn] = obj.ifft(tLoc=tLoc[tn], xLoc=xLoc[xn], zLoc=zLoc[zn])
-            yLoc = chebdif(obj.N,1)[0]
+                        field[tn,xn,zn] = self.ifft(tLoc=tLoc[tn], xLoc=xLoc[xn], zLoc=zLoc[zn])
+            yLoc = chebdif(self.N,1)[0]
         else:
             yLoc = np.asarray(yLoc).reshape(yLoc.size)
             assert not any(np.abs(yLoc)-1.>1.0e-7), 'yLoc must only have points in [-1,1]'
@@ -859,7 +859,7 @@ class flowField(np.ndarray):
             for tn in range(tLoc.size):
                 for xn in range(xLoc.size):
                     for zn in range(zLoc.size):
-                        fieldTemp = obj.ifft(tLoc=tLoc[tn], xLoc=xLoc[xn], zLoc=zLoc[zn])
+                        fieldTemp = self.ifft(tLoc=tLoc[tn], xLoc=xLoc[xn], zLoc=zLoc[zn])
                         for scal in range(self.nd):
                             field[tn,xn,zn,scal] = chebint(fieldTemp[scal], yLoc)
 
@@ -1017,7 +1017,7 @@ class flowField(np.ndarray):
             xLoc = 0. ; zLoc = gama*etaLoc/b
         
         if yLocFlag: field = obj.getPhysical(tLoc=tLoc, xLoc=xLoc, zLoc=zLoc, yLoc=yLoc)
-        else: field = obj.getPhysical(tLoc=tLoc, xLoc=xLoc, zLoc=zLoc, withBase=withBase)
+        else: field = obj.getPhysical(tLoc=tLoc, xLoc=xLoc, zLoc=zLoc)
         # The output of .getField(), field, will be of shape (tLoc.size, xLoc.size, zLoc.size, obj.nd, yLoc.size)
         #     But either xLoc.size or zLoc.size is 1, compressing that axis:
         field = field.reshape((tLoc.size, etaLoc.size, obj.nd, yLoc.size))

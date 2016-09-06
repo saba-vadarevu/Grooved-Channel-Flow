@@ -68,6 +68,18 @@ def presDrag(pf):
     
     return np.abs( -4.*eps*a*pWallIm)/4.*pf.flowDict['Re'], np.abs( -4.*eps*b*pWallIm)/4.*pf.flowDict['Re']
 
+def vCL_RMS(vf):
+    v = vf.getScalar(nd=1)
+    a = vf.flowDict['alpha']; b = vf.flowDict['beta']; eps = vf.flowDict['eps'] 
+    gma = np.sqrt(a**2 + b**2)
+    Lxi = 2.*np.pi/gma
+
+    vCL2 = lambda xi: (v.getPhysical(xLoc=a/gma*xi, zLoc=b/gma*xi, yLoc=-2.*eps*np.cos(gma*xi)).flatten()[0])**2
+
+    vCL_RMS = np.sqrt(1./Lxi*spint.quad(vCL2, 0., Lxi, epsabs=1.0e-08, epsrel=1.0e-05)[0])
+    return vCL_RMS
+    
+
 def shearStress(vf,seprn=False,localDist=False):
     """ Returns drag due to skin friction along streamwise, only for streamwise waviness (currently)
     """
@@ -155,9 +167,11 @@ def shearStress(vf,seprn=False,localDist=False):
     avgShearStress = avgStrainRate/vf.flowDict['Re']    # Follows from non-dimensionalization
     # Refer to documentation
     stressDict = {'avgStress':avgShearStress,'avgStressFraction':avgShearStress/4.*vf.flowDict['Re']}
+    if localDist:
+        stressDict.update({'strainRateFun':strainRate})
     if  seprn:
         assert (strainRate(0.) > 0.) and (strainRate(Leta) > 0. )
-        etaArr = np.arange(0.,Leta,Leta/100.)
+        etaArr = np.arange(0.,Leta,Leta/1000.)
         coarseStrRate = strainRate(etaArr)
         # Calculate strain rate at the wall over a coarse grid of 1000 points
         
@@ -176,11 +190,11 @@ def shearStress(vf,seprn=False,localDist=False):
             
             # I'm not using a binary search- it's pointless,
             #   It's faster to do ifft and stuff with arrays, 
-            #   and even if I use a binary search to do a binary search
+            #   and even if I use a binary search,
             #   I can't say the result is physically valid since I use
             #   only a few Fourier modes
-            sepArr = np.arange(sep0,sep1,(sep1-sep0)/100.)
-            reatArr = np.arange(reat0,reat1,(reat1-reat0)/100.)
+            sepArr = np.arange(sep0,sep1*1.0005,(sep1-sep0)/1000.)
+            reatArr = np.arange(reat0,reat1*1.0005,(reat1-reat0)/1000.)
 
             sepStrRate = strainRate(sepArr)
             reatStrRate = strainRate(reatArr)

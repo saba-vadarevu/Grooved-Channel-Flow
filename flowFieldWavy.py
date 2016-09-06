@@ -3,7 +3,6 @@ from myUtils import *
 import numpy as np
 import scipy.io as sio
 import os
-import matlab.engine
 import h5py
 
 
@@ -276,27 +275,6 @@ def loadff(fName,prefix='',checkNorm=False):
     return vf,pf
  
 
-MATLABFunctionPath = homeFolder+'/Dropbox/gitwork/matlab/wavy_newt/3D/'
-MATLABLibraryPath = homeFolder+'/Dropbox/gitwork/matlab/library/'
-def runMATLAB(g=1.0, eps=0.02, theta=0, Re=100., N=60, n=6,multi=False,tol=1.0e-10):
-    """ Returns vf, pf, fnorm, flag"""
-    eng = matlab.engine.start_matlab()
-    eng.addpath(MATLABFunctionPath)
-    eng.addpath(MATLABLibraryPath)
-    if not multi:
-        xList,fnorm,a,b = eng.runFromPy(g,eps,np.float64(theta),Re,np.float64(N),np.float64(n),np.float64(tol),nargout=4)
-        flg = 0
-    else:
-        Nlim = N; nlim = n
-        N = 40; n = 4
-        xList,fnorm,a,b,N,n,flg = eng.runFromPyMulti(g,eps,np.float64(theta),Re,np.float64(N),np.float64(Nlim),np.float64(n),np.float64(nlim),np.float64(tol),nargout=7)
-
-    x = np.asarray(xList); fnorm = np.asarray(np.float6464(fnorm)).flatten()
-    N=int(N); n=int(n); flg=int(flg)
-    eng.quit()
-    vf,pf = mat2ff(arr=x, a=a,b=b,Re=Re,eps=eps,N=N,n=n)
-    return vf,pf,fnorm,flg
-    
     
 class flowFieldWavy(flowField):
     '''Subclass of flowField
@@ -525,6 +503,24 @@ class flowFieldWavy(flowField):
         
         return partialz2
 
+    def residuals(self,pField=None,**kwargs):
+        """
+        Overloading the residuals function to slice fields as L+=2 and M+=2
+        """
+        L = self.flowDict['L']
+        M = self.flowDict['M']
+        if L != 0: Lnew = L+2
+        else: Lnew = L
+        if M != 0: Mnew = M+2
+        else: Mnew = M
+        vf = self.slice(L=Lnew, M=Mnew)
+        if pField is None:
+            pField = vf.getScalar().zero()
+        else:
+            pField = pField.slice(L=Lnew,M=Mnew)
+        res = flowField.residuals(vf, pField=pField, **kwargs)
+
+        return res.slice(L=L,M=M)
    
     def printPhysical(self,**kwargs):
         '''Refer to flowField.printCSV()
@@ -670,17 +666,29 @@ class flowFieldRiblet(flowFieldWavy):
         return partialz2
     
 
+    def saveh5fName(self,fNamePrefix='ribEq1',prefix='solutions/ribEq/'):
+        fName = 'L'+str(self.flowDict['L'])+'M'+str(self.flowDict['M'])+'N'+str(self.flowDict['N'])
+        fName = fName + 'E'+ '%04d' %(int( round(self.flowDict['eps']*1.0e4))) + '.hdf5'
+
+        fName = fNamePrefix + fName
+        return fName , prefix
+
+
     def saveh5(self,fNamePrefix='ribEq1',prefix='solutions/ribEq/'):
         """ Saves self to a hdf5 file
         Input:
             fNamePrefix (None): prefix to file name, such as LBeq1
             prefix ('solutions/'): Path prefix
         Name of hdf5 file is fNamePrefix+prefix+'LxMxNxExxxx.hdf5'
-        """
+        
         fName = 'L'+str(self.flowDict['L'])+'M'+str(self.flowDict['M'])+'N'+str(self.flowDict['N'])
         fName = fName + 'E'+ '%04d' %(int( round(self.flowDict['eps']*1.0e4))) + '.hdf5'
 
         fName = prefix + fNamePrefix + fName
+	"""
+
+        fName, pathPrefix = self.saveh5fName(fNamePrefix=fNamePrefix, prefix=prefix)
+        fName = pathPrefix + fName
 
         outFile = h5py.File(fName, "w")
         assert self.nd == 4, "Save flowFields that include a pressure field"
