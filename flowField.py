@@ -500,9 +500,9 @@ class flowField(np.ndarray):
         elif nd == 2:
             L = self.flowDict['L']; M = self.flowDict['M']
             zeroModes = scalar.copyArray()[0,L,:,0]      
-            # When integrating along z, only the modes with m=0 contribute to the volume flux
+            # When integrating along x, only the modes with l=0 contribute to the volume flux
 
-            #zeroModes is of shape (nx,N)
+            #zeroModes is of shape (nz,N)
             # To integrate along y, a matrix product of zeroModes with weights as a column vector works
             weights = weights.reshape((self.N,1))
             integrateY = np.dot(zeroModes,weights)      # This is an array of shape (nz,1)
@@ -811,8 +811,7 @@ class flowField(np.ndarray):
         Arguments: tLoc (default=0.), xLoc (default=0.), zLoc (default=0.))
         Note: The returned array is of dtype np.real (float64), since all flow field variables are real quantities
             If, for some reason, a complex field variable is used, this needs to change
-        To obtain field for multiple locations in t,x,z, use .printField(toFile=False)
-            Do remember to have a look at the other arguments of .printField()"""
+        """
         fields = np.zeros((self.nd,self.N))
         a = self.flowDict['alpha']; b = self.flowDict['beta']; omega = self.flowDict['omega']
         K = self.flowDict['K'];  L = self.flowDict['L']; M = self.flowDict['M']

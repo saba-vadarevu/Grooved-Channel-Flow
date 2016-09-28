@@ -257,7 +257,7 @@ def saveff(vf,pf,prefix='solutions/'):
     print('saved to ',fName)
     return
 
-def loadff(fName,prefix='',checkNorm=False):
+def loadff(fName,prefix='',checkNorm=False,tol=1.0e-10):
     flowDict = name2dict(fName)
     if not fName.endswith('.npy'):
         fName = fName + '.npy'
@@ -266,11 +266,9 @@ def loadff(fName,prefix='',checkNorm=False):
     vf = x.slice(nd=[0,1,2])
     pf = x.getScalar(nd=3)
     if checkNorm:
-        ls = 0; ms = 0
-        if vf.nx != 0: ls = 1
-        if vf.nz != 0: ms = 1
-        res = vf.slice(L=vf.nx//2+2*ls, M=vf.nz//2+2*ms).residuals(pField=pf.slice(L=pf.nx//2+2*ls, M=pf.nz//2+2*ms))
-        assert res.slice(L=vf.nx//2,M=vf.nz//2).norm() <= 1.0e-12
+        resNorm = vf.residuals(pField=pf).appendField(vf.div()).norm()
+        if  resNorm<= tol:
+            warn("Residual norm %.3g is greater than tolerance %.3g"%(resNorm,tol))
 
     return vf,pf
  

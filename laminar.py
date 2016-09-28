@@ -68,8 +68,10 @@ def presDrag(pf):
     
     return np.abs( -4.*eps*a*pWallIm)/4.*pf.flowDict['Re'], np.abs( -4.*eps*b*pWallIm)/4.*pf.flowDict['Re']
 
-def vCL_RMS(vf):
-    v = vf.getScalar(nd=1)
+def vCL_RMS(vf,nd=1):
+    """Returns the RMS value of centerline (wall-normal) velocity.
+    To obtain streamwise or spanwise velocities, supply keyword argument 'nd'"""
+    v = vf.getScalar(nd=nd)
     a = vf.flowDict['alpha']; b = vf.flowDict['beta']; eps = vf.flowDict['eps'] 
     gma = np.sqrt(a**2 + b**2)
     Lxi = 2.*np.pi/gma
@@ -367,7 +369,7 @@ def jcbn(vf):
     WallVel[:] = vArr3d[:,:,[0,-1]]
     if vf.flowDict['isPois'] == 0:
         WallVel[m//2, 0] -= np.array([1.,-1.])     # Moving walls for Couette flow
-    assert np.linalg.norm(WallVel.flatten()) == 0.
+    assert np.linalg.norm(WallVel.flatten()) == 0., "Velocities at the wall are non-zero. Did you use .slice()?"
     
     # Matrices needed for later:
     I = np.identity(N,dtype=np.complex)
