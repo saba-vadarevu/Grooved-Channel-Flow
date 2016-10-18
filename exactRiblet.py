@@ -38,6 +38,7 @@ def dict2ff(flowDict):
     vf[0,vf.nx//2,vf.nz//2,0] = uProfile
     return vf
 
+
 def linr(flowDict): 
     """Returns matrix representing the linear operator for the equilibria/TWS for riblet case
     Linear operator for exact solutions isn't very different from that for laminar, 
@@ -535,4 +536,9 @@ def testExactRibletModule(L=3,M=5,N=20,eps=0.025):
     NLtestResult = np.linalg.norm(NLterm - NLtermClass.flatten()) <= tol
     assert linTestResult and NLtestResult
     return linTestResult, NLtestResult
+
+
+
+
+
 

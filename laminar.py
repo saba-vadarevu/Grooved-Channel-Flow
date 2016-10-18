@@ -85,105 +85,152 @@ def vCL_RMS(vf,nd=1):
 def shearStress(vf,seprn=False,localDist=False):
     """ Returns drag due to skin friction along streamwise, only for streamwise waviness (currently)
     """
-    assert vf.nz == 1
+    a = vf.flowDict['alpha']; b = vf.flowDict['beta']; gma = np.sqrt(a**2 + b**2)
+    eps = vf.flowDict['eps']
+    A = 2.*eps
     # Refer to documentation to meanings of symbols
     # Building a function that can be handed to scipy.integrate
 
-    vfx = vf.ddx().view4d(); vfy = vf.ddy().view4d()
+    # First, I split the field into velocities normal to and along the groove
+    # xi is the direction perpendicular to the grooves,
+    # zeta is the direction along the grooves- the homogenous direction
+    # eta is identical to y, the wall-normal direction
+    newField = vf.grooveAxes()
+    uxi = newField.getScalar()
+    v = newField.getScalar(nd=1)
+    uzeta = newField.getScalar(nd=2)
 
-    # Arrays for storing the values of Fourier mdoes at the walls
-    uxWall = np.zeros(vf.nx,dtype=np.complex)
-    uyWall = uxWall.copy()
-    vxWall = uxWall.copy()
-    vyWall = uxWall.copy()
+    # Next, resolve this into derivatives along xi and y (derivatives along zeta are zero),
+    #   and get Fourier coefficients of the fields at the bottom wall
+    # Since the solution is homogeneous in zeta, I don't only need Fourier modes k(a,b) for oblique cases
+    dxi_uxiWall = np.zeros(max(vf.nx, vf.nz), dtype=np.complex)
+    dy_uxiWall = dxi_uxiWall.copy()
+    vWall = dxi_uxiWall.copy();   uxiWall = dxi_uxiWall.copy()
+    dxi_vWall = dxi_uxiWall.copy();   dy_vWall = dxi_uxiWall.copy()
+    dxi_uzetaWall = dxi_uxiWall.copy();   dy_uzetaWall = dxi_uxiWall.copy()
 
-    uxWall[:] = vfx[0,:, 0, 0,-1]  
-    uyWall[:] = vfy[0,:, 0, 0,-1]
-    vxWall[:] = vfx[0,:, 0, 1,-1]
-    vyWall[:] = vfy[0,:, 0, 1,-1]
+    L = vf.flowDict['L'] ; M = vf.flowDict['M']
+    if L == 0:
+        dxi_uxiWall[:]      = uxi.ddxi()[0,0,:,0,-1]
+        dy_uxiWall[:]       = uxi.ddy()[0,0,:,0,-1]
+        dxi_vWall[:]        = v.ddxi()[0,0,:,0,-1]
+        dy_vWall[:]         = v.ddy()[0,0,:,0,-1]
+        uxiWall[:]          = uxi[0,0,:,0,-1]
+        vWall[:]            = v[0,0,:,0,-1]
+        dxi_uzetaWall[:]    = uzeta.ddxi()[0,0,:,0,-1]
+        dy_uzetaWall[:]     = uzeta.ddy()[0,0,:,0,-1]
+    elif M == 0:
+        dxi_uxiWall[:]      = uxi.ddxi()[0,:,0,0,-1]
+        dy_uxiWall[:]       = uxi.ddy()[0,:,0,0,-1]
+        dxi_vWall[:]        = v.ddxi()[0,:,0,0,-1]
+        dy_vWall[:]         = v.ddy()[0,:,0,0,-1]
+        uxiWall[:]          = uxi[0,:,0,0,-1]
+        vWall[:]            = v[0,:,0,0,-1]
+        dxi_uzetaWall[:]    = uzeta.ddxi()[0,:,0,0,-1]
+        dy_uzetaWall[:]     = uzeta.ddy()[0,:,0,0,-1]
+    else:
+        dxi_uxiWall[:]      = np.diag(uxi.ddxi()[0,:,:,0,-1])
+        dy_uxiWall[:]       = np.diag(uxi.ddy()[0,:,:,0,-1])
+        dxi_vWall[:]        = np.diag(v.ddxi()[0,:,:,0,-1])
+        dy_vWall[:]         = np.diag(v.ddy()[0,:,:,0,-1])
+        uxiWall[:]          = np.diag(uxi[0,:,:,0,-1])
+        vWall[:]            = np.diag(v[0,:,:,0,-1])
+        dxi_uzetaWall[:]    = np.diag(uzeta.ddxi()[0,:,:,0,-1])
+        dy_uzetaWall[:]     = np.diag(uzeta.ddy()[0,:,:,0,-1])
 
-    eps = vf.flowDict['eps']; a = vf.flowDict['alpha']; b = vf.flowDict['beta']
-    gma = np.sqrt(a**2 + b**2)
+
+    # Creating the matrix 'Q' that relates the local axes at the wall (normal, tangents) 
+    #       to (xi, eta, zeta), the axes fixed to the grooves
+    # (t, n, tau)^T =  Q* (xi, eta, zeta)^T
+    # But first, creating a couple of functions invCfun(xi), Kfun(xi) which are entries of Q
+    #       where invC = 1/C = 1/sqrt{1 + (A*gma*sin(gma*xi))**2 },
+    #                K = sin(gma*xi) * (1/C)
+    invCfun = lambda xi: 1./np.sqrt(  1. + (A*gma* np.sin(gma*xi) )**2  )
+    Kfun    = lambda xi: np.sin(gma*xi)*invCfun(xi)
+    # Derivatives of 1/C and K are also needed:
+    dxi_invCfun = lambda xi: (-1.*invCfun(xi)**3) * (A**2) * (gma**3) * np.sin(gma*xi) * np.cos(gma*xi)
+    dxi_Kfun = lambda xi: gma * np.cos(gma*xi) * invCfun(xi)   +   np.sin(gma*xi) * dxi_invCfun(xi) 
+
+    # Since I have elements of Q being functions of xi, I define the terms directly instead of an array
+    Q11 = invCfun
+    Q12 = lambda xi: -A*gma*Kfun(xi)
+    Q21 = lambda xi: A*gma*Kfun(xi)
+    Q22 = invCfun
+
+    # Next, I write ifft functions to get the value of velocity fields at the wall, given Fourier coefficients
+
     gx = eps*a; gz = eps*b; g = eps*gma
     K = max(vf.nx, vf.nz)//2
     kArr = np.arange(-K, K+1).reshape((1,2*K+1))
-
-    lArr = np.arange(-(vf.nx//2), vf.nx//2+1)
-    def _ifftWall(eta,ffWall):
+    def _ifftWall(xi,ffWall):
         """ Returns value of field 'ff' at the wall when Fourier coefficients
             at the wall 'ffWall' are supplied. 
         Inputs:
-            eta: locations in eta, can be array
+            xi: locations in xi, can be array
             ffWall: coefficients at the wall, organized as -k(a,b),..,(a,b),2(a,b),..,k(a,b)
         Returns:
-            ffEta, array if eta is input as array
+            uvArr, array if xi is input as array
             """
-        eta = np.array([eta]).flatten()
-        eta = eta.reshape((eta.size,1))
+        xi = np.array([xi]).flatten()
+        xi = xi.reshape((xi.size,1))
 
         ffWall = ffWall.reshape((1,2*K+1))
-        ffVals = np.real(np.sum(ffWall*np.exp(1.j*kArr*gma*eta),axis=1))
-        return ffVals.flatten()
+        velArr = np.real(np.sum(ffWall*np.exp(1.j*kArr*gma*xi),axis=1))
+        return velArr.flatten()
 
-    def _strainRateFun(eta,uxw,uyw,vxw,vyw):
+    def _strainRateFun(xi):
         """ Local strain rate, du_t/dn"""
-        eta = np.array([eta]).flatten()
-        sr = np.zeros(eta.shape) 
+        xi = np.array([xi]).flatten()
+        sr = np.zeros(xi.size) 
 
-        # Local strain-rate du_t/dn, t: tangential, n:normal coordinate
-        # Going from (x,y) to (t,n) involves coordinate rotation, 
-        # du_t/dn = c21*c11*u_x + c21*c12*v_x + c22*c11*u_y + c22*c12*v_y
-        #     where     [ c11  c12] =   [e_t.e_x    e_t.e_y]
-        #               [ c21  c22] =   [e_n.e_x    e_n.e_y]
-        # Cij := cij/sqrt( 1 + (2*gx*sin(ax))^2 )  # Refer to documentation for details
-        
-        # C21*C11*u_x
-        sr += 2.*g*np.sin(gma*eta)*_ifftWall(eta,uxw)
+        # du_t/dn = Q21.Q11.dxi(uxi) + Q21.Q12.dxi(v) + Q22.Q11.dy(uxi) + Q22.Q12.dy(v)
+        #           + Q21.uxi.dxi(1/C) + Q21.v.(-A.gma).dxi(K)
+        #   where Qij are functions of xi, and 1/C and K are defined using functions invCfun and Kfun
+        q11 = Q11(xi);  q12 = Q12(xi);  q21 = Q21(xi);  q22 = Q22(xi)
 
-        # C21*C12*v_x
-        sr += -4.*(g*np.sin(gma*eta))**2 * _ifftWall(eta,vxw)
+        sr +=  q21*q11*_ifftWall(xi, dxi_uxiWall) + q21*q12*_ifftWall(xi, dxi_vWall)
+        sr +=  q22*q11*_ifftWall(xi, dy_uxiWall)  + q22*q12*_ifftWall(xi, dy_vWall)
+        sr +=  q21*dxi_invCfun(xi)*_ifftWall(xi, uxiWall)  +  q21*(-A*gma)*dxi_Kfun(xi)*_ifftWall(xi, vWall)
 
-        # C22*C11*u_y
-        sr += _ifftWall(eta,uyw)
-
-        # C22*C12*v_y
-        sr += -2.*g*np.sin(gma*eta)*_ifftWall(eta,vyw)
-
-        # Dividing by (1+ (2*gx * sin(ax))^2 )
-        sr *= 1./(1.+ (2.*g * np.sin(gma*eta))**2 )
         return sr
 
-    strainRate = lambda eta: _strainRateFun(eta,uxWall, uyWall, vxWall, vyWall)
+    # Currently _strainRateFun is written only for du_t/dn. I need to include du_tau/dn later
+    strainRate = _strainRateFun
+    if vf.nz > 1:
+        warn('The average shear stress is likely to be inaccurate, since I do not account for du_tau/dn')
+    
 
     # Lx = 2.*np.pi/a # Wavelength in x
     # Lz = 2.*np.pi/b
-    Leta = 2.*np.pi/gma
+    Lxi = 2.*np.pi/gma
 
     # Integrating du_t/dn * e_t.e_x * ds from x=0 to 2*pi/a:
-    integratedStrainRate = spint.quad(strainRate, 0., Leta, epsabs = 1.0e-08, epsrel=1.0e-05)[0]
+    integratedStrainRate = spint.quad(strainRate, 0., Lxi, epsabs = 1.0e-08, epsrel=1.0e-05)[0]
     # e_t.e_x * ds = dx, so don't have to worry about that bit. 
     
     # Times 2, because the force acts on the top surface too. Dividing by 
     #   streamwise wavelength to get the force per unit area (spanwise homogeneous)
-    avgStrainRate = 2.*integratedStrainRate/Leta
+    avgStrainRate = 2.*integratedStrainRate/Lxi
     avgShearStress = avgStrainRate/vf.flowDict['Re']    # Follows from non-dimensionalization
     # Refer to documentation
     stressDict = {'avgStress':avgShearStress,'avgStressFraction':avgShearStress/4.*vf.flowDict['Re']}
     if localDist:
         stressDict.update({'strainRateFun':strainRate})
     if  seprn:
-        assert (strainRate(0.) > 0.) and (strainRate(Leta) > 0. )
-        etaArr = np.arange(0.,Leta,Leta/1000.)
-        coarseStrRate = strainRate(etaArr)
+        sepTol = 1.0e-09
+        assert (strainRate(0.) >= -sepTol) and (strainRate(Lxi) >= -sepTol )
+        xiArr = np.arange(0.,Lxi,Lxi/1000.)
+        coarseStrRate = strainRate(xiArr)
         # Calculate strain rate at the wall over a coarse grid of 1000 points
         
-        # Find indices (of etaArr) for the first and last zero crossings of local strain rate
-        negIndArr = np.arange(etaArr.size)[coarseStrRate<=0.]
+        # Find indices (of xiArr) for the first and last zero crossings of local strain rate
+        negIndArr = np.arange(xiArr.size)[coarseStrRate< -sepTol]
         if negIndArr.size > 0:
-            sep0 = etaArr[negIndArr[0]-1]; sep1 = etaArr[negIndArr[0]]
-            reat0 = etaArr[negIndArr[-1]]; reat1 = etaArr[negIndArr[-1]+1]
-            # Separation occurs between etaArr[sepInd0],etaArr[sepInd1],
-            # Reattachment occurs between etaArr[reatInd0],etaArr[reatInd1]
+            assert (negIndArr[0] > 0) and ( negIndArr[-1] < (xiArr.size-1) ),"Separation/reattachment detected at groove-crest"
+            sep0 = xiArr[negIndArr[0]-1]; sep1 = xiArr[negIndArr[0]]
+            reat0 = xiArr[negIndArr[-1]]; reat1 = xiArr[negIndArr[-1]+1]
+            # Separation occurs between xiArr[sepInd0],xiArr[sepInd1],
+            # Reattachment occurs between xiArr[reatInd0],xiArr[reatInd1]
 
             if ( (negIndArr[-1] - negIndArr[0] +1 ) != negIndArr.size):
                 stressDict.update({'MultipleCrossings':True})
@@ -203,8 +250,8 @@ def shearStress(vf,seprn=False,localDist=False):
 
             sepNegIndArr = np.arange(sepArr.size)[sepStrRate<=0.]
             reatPosIndArr = np.arange(reatArr.size)[reatStrRate>=0.] 
-            xSep = sepArr[sepNegIndArr[0]]/Leta
-            xReat = reatArr[reatPosIndArr[0]]/Leta
+            xSep = sepArr[sepNegIndArr[0]]/Lxi
+            xReat = reatArr[reatPosIndArr[0]]/Lxi
 
             yBub = ( 0.5*(np.cos(2.*np.pi*xSep) + np.cos(2.*np.pi*xReat)) +1.)/2.
             # Height of bubble approximated as average of height of separation and reattachment

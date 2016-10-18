@@ -501,6 +501,46 @@ class flowFieldWavy(flowField):
         
         return partialz2
 
+    def ddxi(self):
+        """ Partial derivative in the direction perpendicular to the grooves (non-homogeneous direction)
+        partial_xi = a/gma * partial_x  + b/gma * partial_z"""
+        a = self.flowDict['alpha']
+        b = self.flowDict['beta']
+        gma = np.sqrt(a**2 + b**2)
+        return ( a/gma * self.ddx()  +  b/gma * self.ddz() )
+
+    def ddeta(self):
+        return self.ddy()
+    
+    def ddzeta(self):
+        """ Partial derivative in the direction along the grooves (homogeneous direction)
+        partial_zeta = -b/gma * partial_x + a/gma * partial_z """
+        a = self.flowDict['alpha']
+        b = self.flowDict['beta']
+        gma = np.sqrt(a**2 + b**2)
+        return ( -b/gma * self.ddx()  +  a/gma * self.ddz() )
+
+    def grooveAxes(self):
+        """ Returns velocity vector field with scalars defined with respect to the grooves
+        The first scalar (nd=0) is perpendicular to the grooves, i.e., along xi = a/gma * x + b/gma * z
+        The second (nd=1) is wall-normal, and doesn't change from self
+        The third (nd=2) is along the grooves, along zeta = -b/gma * x + a/gma * z
+        """
+        assert self.nd >= 3, "Velocity field must have at least 3 components"
+        u = self.getScalar(); v = self.getScalar(nd=1); w = self.getScalar(nd=2)
+        a = self.flowDict['alpha']; b = self.flowDict['beta']; gma = np.sqrt(a**2 + b**2)
+        u_xi = a/gma * u + b/gma * w
+        u_eta = v
+        u_zeta = -b/gma * u + a/gma * w
+        newField = self.view4d().zero()
+        newField[:,:,:,0:1] = u_xi
+        newField[:,:,:,1:2] = u_eta
+        newField[:,:,:,2:3] = u_zeta
+
+        return newField
+
+
+
     def residuals(self,pField=None,**kwargs):
         """
         Overloading the residuals function to slice fields as L+=2 and M+=2
@@ -594,7 +634,7 @@ class flowFieldRiblet(flowFieldWavy):
         flowField.ddx() and flowField.ddx2()"""
     def __new__(cls,arr=None,flowDict=None,dictFile=None):
         #obj = flowField.__new__(flowFieldWavy,arr=arr,flowDict=flowDict,dictFile=dictFile)
-        obj = flowField.__new__(cls,arr=arr,flowDict=flowDict,dictFile=dictFile)
+        obj = flowFieldWavy.__new__(cls,arr=arr,flowDict=flowDict,dictFile=dictFile)
         if 'eps' not in obj.flowDict:
             warn('flowFieldWavy object does not have key "eps" in its dictionary. Setting "eps" to zero')
             obj.flowDict['eps'] = 0.
