@@ -39,36 +39,134 @@ def dict2ff(flowDict):
     return vf
 
 
-def linr(flowDict): 
+def linr(flowDict,complexType = np.complex,epsArr=np.array([0.05,0.,0.])): 
     """Returns matrix representing the linear operator for the equilibria/TWS for riblet case
     Linear operator for exact solutions isn't very different from that for laminar, 
         all inter-modal interaction remains the same for a fixed 'l'. 
     So, we use the function already written in the laminar.py module and modify it to suit
-        the current case"""
-    assert flowDict['L'] != 0 and flowDict['M'] != 0
-    if flowDict['L'] > 4:
-        print('L is set to 4 from ', flowDict['L'] )
-        flowDict.update({'L':4})
-    if flowDict['M'] > 8:
-        print('M is set to 8 from ', flowDict['M'] )
-        flowDict.update({'M':8})
-    Lmat_lam = lam.linr(updateDict(flowDict,{'L':0,'alpha':0.}))
+        the current case
+    To use single floats, input argument complexType=np.complex64 
+    Inputs:
+        flowDict
+        complexType (default: np.complex): Use np.complex64 for single precision
+        epsArr (default: [0.05,0.,0.]): 1-D numpy array containing amplitudes of surface-modes
+                            First element is eps_1, and so on... 
+    Outputs:
+        Lmat:   Matrix representing linear terms for the complete state-vectors"""
+    if epsArr.ndim !=0: warn("epsArr is not a 1-D array. Fix this.")
+    if False:
+        assert flowDict['L'] != 0 and flowDict['M'] != 0
+        if flowDict['L'] > 4: print('L is set to 4 from ', flowDict['L'] )
+            flowDict.update({'L':4})
+        if flowDict['M'] > 8:
+            print('M is set to 8 from ', flowDict['M'] )
+            flowDict.update({'M':8})
+    # Lmat_lam = lam.linr(updateDict(flowDict,{'L':0,'alpha':0.}))
 
     L = flowDict['L']; M = flowDict['M']
+    L1 = L+1
     nx = int(2*L+1)
     nz = int(2*M+1)
-    N  = int(flowDict['N']); N4 = 4*N
-    s1 = nz*N4
     a = flowDict['alpha']; a2 = a**2
+    b = flowDict['beta']; b2 = b**2
     Re = flowDict['Re']
-    I = np.identity(N)
-    assert Lmat_lam.shape[0] == nz*N4
-    
-    # L_lam is built for the case of L= 0. For exact solutions, we have L!= 0
-    #   So, we take L_lam, and add i.l.alpha or -l**2.a**2 as appropriate
-    Lmat = np.zeros((nx*nz*N4,nx*nz*N4),dtype=np.complex)
 
-    mat1 = np.zeros((nz*N4,nz*N4),dtype=np.complex); mat2 = mat1.copy()
+    N  = int(flowDict['N']); N4 = 4*N
+    if complexType = np.complex64:
+        DM = np.float32(DM)
+    D = DM[:,:,0].reshape((N,N)); D2 = DM[:,:,1].reshape((N,N))
+    # Change N, D, and D2 if imposing point-wise inversion symmetries
+        
+    I = np.identity(N,dtype=complexType); Z = np.zeros((N,N),dtype=complexType)
+
+    def _assignL0flat(L0flat,m):
+        assert (L0flat.shape[0] == N4) and (L0flat.shape[1] == N4)
+        # L_0,flat is built for the case of L= 0 without accounting for wall effects. 
+        L0flat[:,:] = np.vstack(
+                np.hstack( -(-m**2 * b2 * I + D2)/Re,  Z,  Z,  Z   ),
+                np.hstack( Z,  -(-m**2 * b2 * I + D2)/Re,  Z,  D   ),
+                np.hstack( Z,  Z,  -(-m**2 * b2 * I + D2)/Re, 1.j*m*b*I ),
+                np.hstack( Z,  D,  1.j*m*b*I,  Z)       )
+        # First row-block is streamwise momentum equation, diffusion term. 
+        #       Pressure term isn't set because it's zero for l=0
+        # Second is wall-normal momentum
+        # Third is spanwise momentum
+        # Fourth is continuity
+        # Streamwise derivatives in all four equations are set to zero because l=0
+        return
+
+    # Populating arrays T_z(q), T_zz(q), and T^2_z(q)
+    Tz = np.zeros(2*epsArr.size+1, dtype=complexType)
+    qArr = np.arange(-epsArr.size, epsArr.size+1)
+    eArr = qArr.copy()
+    eArr[:epsArr.size] = epsArr[::-1]
+    eArr[-epsArr.size:] = epsArr
+    # eArr represents epsArr, but extending form -ve to 0 to +ve instead of just +ve
+    if complexType=np.complex64:
+        qArr = np.float32(qArr); eArr = np.float32(eArr)
+    Tzz = Tz.copy();    Tz2 = Tz.copy()
+
+    Tz[:] = -1.j*b*qArr*eArr
+    Tzz[:] = b2 * qArr**2 * eArr
+
+    assert epsArr.size <= 3, "The expression below for Tz2 is only valid for upto eps_3"
+    # I derived Tz2 assuming three modes, so I'll just go with it instead of generalizing now
+    # tmpArr represents (eps_0=0, eps_1, eps_2, eps_3)
+    tmpArr = np.zeros(4,dtype=np.float32)
+    tmpArr[1:epsArr.size+1] = epsArr
+
+    # tmpArr2 represents Tz2 when three modes are presents. tmpArr2[0] is for e^0ibZ, 
+    #       and tmpArr2[6] is for e^6ibZ. Entries for positive and negative modes remain the same
+    tmpArr2 = np.zeros(7,dtype=np.float32)
+    tmpArr2[0] = 2.*(-9.*tmpArr[3]**2  - 4.*tmpArr[2]**2  - tmpArr[1]**2 )
+    tmpArr2[1] = -12.*tmpArr[2]*tmpArr[3]  - 4.*tmpArr[1]*tmpArr[2]
+    tmpArr2[2] = -6.*tmpArr[1]*tmpArr[3] + tmpArr[1]**2
+    tmpArr2[3] = 4.*tmpArr[1]*tmpArr[2]
+    tmpArr2[4] = 6.*tmpArr[1]*tmpArr[3] + 4.*tmpArr[2]**2
+    tmpArr2[5] = 12.*tmpArr[2]*tmpArr[3]
+    tmpArr2[6] = 9.*tmpArr[3]**2
+
+    tmpArr2 = -b2 * tmpArr2[1:epsArr.size+1]
+    Tz2[:epsArr.size] = tmpArr2[::-1]
+    Tz2[-epsArr.size:] = tmpArr2
+    del tmpArr,tmpArr2
+    
+    
+    # Number of columns is increased by 2*epsArr.size because wall effects produce
+    #   interactions all the way from -M-epsArr.size to M+epsArr.size
+    #   I prefer to build the matrix with these included, and then truncate to -M to M
+    L0wavy = np.zeros((nz*N4, (nz+2*epsArr.size)*N4), dtype=complexType)
+    # Wall effects show up in spanwise derivatives only
+    # d_z (.) = (-imb)(.) + \sum\limits_q  (T_{z,-q} D) (.)_{l,m+q}
+    # d_zz (.) = (-m^2 b^2)(.) + \sum\limits_q \{(T_{zz,-q} + 2i(m+q)bT_{z,-q})D + T^2_{z,-q} D^2\} (.)_{l,m+q}
+    q0 = epsArr.size
+    for mp in range(nz):
+        m = mp-M
+        _assignL0flat(L0wavy[mp*N4:(mp+1)*N4, (mp+q0)*N4:(mp+q0+1)*N4], m)
+        # The principal diagonal is shifted by q0=epsArr.size 
+
+        # Wall-effects enter into the equations as
+        #   T_z(-q) * (.)_{l,m+q}
+        # Factor of u_{l,m+q} is supposed to be on the q^th diagonal,
+        #   however, since I add extra (epsArr.size) column-blocks on either end,
+        #   this factor must be on (q+epsArr.size)^th diagonal
+        for q in range(-epsArr.size, epsArr.size+1):
+            L0wavy[mp*N4:(mp+1)*N4, (mp+q+q0)*N4: (mp+q+q0+1)*N4] += np.vstack(
+                    np.hstack( -1./Re*( (Tzz[-q+q0] + 2.j*(m+q)*b*Tz[-q+q0])*D + Tz2[-q+q0]*D2), Z, Z, Z),
+                    np.hstack( Z, -1./Re*( (Tzz[-q+q0] + 2.j*(m+q)*b*Tz[-q+q0])*D + Tz2[-q+q0]*D2), Z, Z ), 
+                    np.hstack( Z, Z, -1./Re*( (Tzz[-q+q0] + 2.j*(m+q)*b*Tz[-q+q0])*D + Tz2[-q+q0]*D2), Tz[-q+q0]*D ), 
+                    np.hstack(Z, Z, Tz[-q+q0]*D, Z)     )
+    L0wavy = L0wavy[:, N4*q0: -N4*q0]   # Getting rid of the extra column-blocks
+    # And that concludes building L0wavy
+
+    # For exact solutions, we have L!= 0
+    #   So, I take L0wavy, and add i.l.alpha or -l**2.a**2 as appropriate
+    Lmat = np.zeros((L1*nz*N4,L1*nz*N4),dtype=complexType)
+    # Building only for non-positive streamwise modes. Wall effects only produce
+    #   interactions in the spanwise modes
+
+
+    mat1 = np.zeros((nz*N4,nz*N4),dtype=complexType); mat2 = mat1.copy()
     # Define mat1 and mat2 such that all 'l' terms in the linear matrix can be 
     #   written as l * mat1  + l^2 *mat2
     for mp in range(nz):
@@ -95,17 +193,18 @@ def linr(flowDict):
         # continuity
         mat1[mp*N4+3*N:mp*N4+4*N, mp*N4 : mp*N4+N]      = 1.j*a*I
 
-
-    for lp in range(nx):
+    s1 = nz*N4
+    for lp in range(L1):
         l = lp-L
         
         # Matrix from laminar case where l=0
-        Lmat[lp*s1:(lp+1)*s1, lp*s1:(lp+1)*s1] = Lmat_lam
+        Lmat[lp*s1:(lp+1)*s1, lp*s1:(lp+1)*s1] = L0wavy
         # Adding all the l-terms
         Lmat[lp*s1:(lp+1)*s1, lp*s1:(lp+1)*s1] += l* mat1 + l**2 * mat2
 
-
     return Lmat
+
+
 
 def jcbn(vf):
     eps = vf.flowDict['eps']; a = vf.flowDict['alpha']; b = vf.flowDict['beta']
