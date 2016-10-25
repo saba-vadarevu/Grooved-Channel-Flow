@@ -3,7 +3,6 @@ from pseudo import *
 from warnings import warn
 from flowFieldWavy import *
 import scipy.integrate as spint
-from rootFinder import *
 
 pres0BC = False 
 linTol = 1.0e-12

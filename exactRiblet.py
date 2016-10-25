@@ -56,7 +56,8 @@ def linr(flowDict,complexType = np.complex,epsArr=np.array([0.05,0.,0.])):
     if epsArr.ndim !=0: warn("epsArr is not a 1-D array. Fix this.")
     if False:
         assert flowDict['L'] != 0 and flowDict['M'] != 0
-        if flowDict['L'] > 4: print('L is set to 4 from ', flowDict['L'] )
+        if flowDict['L'] > 4: 
+            print('L is set to 4 from ', flowDict['L'] )
             flowDict.update({'L':4})
         if flowDict['M'] > 8:
             print('M is set to 8 from ', flowDict['M'] )
@@ -72,7 +73,7 @@ def linr(flowDict,complexType = np.complex,epsArr=np.array([0.05,0.,0.])):
     Re = flowDict['Re']
 
     N  = int(flowDict['N']); N4 = 4*N
-    if complexType = np.complex64:
+    if complexType is np.complex64:
         DM = np.float32(DM)
     D = DM[:,:,0].reshape((N,N)); D2 = DM[:,:,1].reshape((N,N))
     # Change N, D, and D2 if imposing point-wise inversion symmetries
@@ -95,42 +96,7 @@ def linr(flowDict,complexType = np.complex,epsArr=np.array([0.05,0.,0.])):
         # Streamwise derivatives in all four equations are set to zero because l=0
         return
 
-    # Populating arrays T_z(q), T_zz(q), and T^2_z(q)
-    Tz = np.zeros(2*epsArr.size+1, dtype=complexType)
-    qArr = np.arange(-epsArr.size, epsArr.size+1)
-    eArr = qArr.copy()
-    eArr[:epsArr.size] = epsArr[::-1]
-    eArr[-epsArr.size:] = epsArr
-    # eArr represents epsArr, but extending form -ve to 0 to +ve instead of just +ve
-    if complexType=np.complex64:
-        qArr = np.float32(qArr); eArr = np.float32(eArr)
-    Tzz = Tz.copy();    Tz2 = Tz.copy()
-
-    Tz[:] = -1.j*b*qArr*eArr
-    Tzz[:] = b2 * qArr**2 * eArr
-
-    assert epsArr.size <= 3, "The expression below for Tz2 is only valid for upto eps_3"
-    # I derived Tz2 assuming three modes, so I'll just go with it instead of generalizing now
-    # tmpArr represents (eps_0=0, eps_1, eps_2, eps_3)
-    tmpArr = np.zeros(4,dtype=np.float32)
-    tmpArr[1:epsArr.size+1] = epsArr
-
-    # tmpArr2 represents Tz2 when three modes are presents. tmpArr2[0] is for e^0ibZ, 
-    #       and tmpArr2[6] is for e^6ibZ. Entries for positive and negative modes remain the same
-    tmpArr2 = np.zeros(7,dtype=np.float32)
-    tmpArr2[0] = 2.*(-9.*tmpArr[3]**2  - 4.*tmpArr[2]**2  - tmpArr[1]**2 )
-    tmpArr2[1] = -12.*tmpArr[2]*tmpArr[3]  - 4.*tmpArr[1]*tmpArr[2]
-    tmpArr2[2] = -6.*tmpArr[1]*tmpArr[3] + tmpArr[1]**2
-    tmpArr2[3] = 4.*tmpArr[1]*tmpArr[2]
-    tmpArr2[4] = 6.*tmpArr[1]*tmpArr[3] + 4.*tmpArr[2]**2
-    tmpArr2[5] = 12.*tmpArr[2]*tmpArr[3]
-    tmpArr2[6] = 9.*tmpArr[3]**2
-
-    tmpArr2 = -b2 * tmpArr2[1:epsArr.size+1]
-    Tz2[:epsArr.size] = tmpArr2[::-1]
-    Tz2[-epsArr.size:] = tmpArr2
-    del tmpArr,tmpArr2
-    
+    Tz, Tzz, Tz2 = Tderivatives(updateDict(flowDict,{'epsArr':epsArr})) 
     
     # Number of columns is increased by 2*epsArr.size because wall effects produce
     #   interactions all the way from -M-epsArr.size to M+epsArr.size

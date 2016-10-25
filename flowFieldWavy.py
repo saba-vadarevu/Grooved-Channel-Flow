@@ -631,7 +631,12 @@ class flowFieldRiblet(flowFieldWavy):
         by flowDict['alpha'] and flowDict['L']
     Since there is no streamwise variation in the surface, 
         We overload methods for differentiation along x, ddx() and ddx2() revert to 
-        flowField.ddx() and flowField.ddx2()"""
+        flowField.ddx() and flowField.ddx2()
+    UPDATE: flowFieldRiblet can now handle multiple surface Fourier modes.
+        DO NOT USE MORE THAN 3 MODES
+    The amplitudes of the Fourier modes are supplied as a numpy array 'epsArr' that is part of 
+        flowDict
+    If epsArr is not present in flowDict, it is created from flowDict['eps']"""
     def __new__(cls,arr=None,flowDict=None,dictFile=None):
         #obj = flowField.__new__(flowFieldWavy,arr=arr,flowDict=flowDict,dictFile=dictFile)
         obj = flowFieldWavy.__new__(cls,arr=arr,flowDict=flowDict,dictFile=dictFile)
@@ -641,7 +646,25 @@ class flowFieldRiblet(flowFieldWavy):
         else:
             assert type(obj.flowDict['eps']) is np.float64 or (type(obj.flowDict['eps']) is np.float), 'eps in flowDict must be of type float'
         obj.verify()
+        Tz, Tzz, Tz2 = Tderivatives(obj.flowDict)
+        obj.Tz = Tz
+        obj.Tzz = Tzz
+        obj.Tz2 = Tz2
         return obj
+
+    def verify(self):
+        """Overloading flowFieldWavy.verify() to account for epsArr (for multiple surface modes)
+        """
+        flowFieldWavy.verify(self)
+        if ('epsArr' in self.flowDict):
+            if not (isinstance(epsArr,np.ndarray)): 
+                warn("flowDict['epsArr'] is not a numpy array. Fix this.")
+            self.flowDict['epsArr'] = np.float32(self.flowDict['epsArr'])
+        else:
+            self.flowDict['epsArr'] = np.array([self.flowDict['eps']],dtype=np.float32)
+
+        return
+
 
     def ddx(self):
         return self.ddX()
@@ -650,57 +673,75 @@ class flowFieldRiblet(flowFieldWavy):
         return self.ddX2()
     
     def ddz(self):
+        self.verify()   # Ensure 'epsArr' exists in self.flowDict
+        epsArr = self.flowDict['epsArr']
         if self.nz == 1:
             return self.zero()
-        partialZ = self.zero()
-        partialZ += self.ddZ()
-        partialY = self.ddy()
-        gz = self.flowDict['eps'] * self.flowDict['beta']
+        partialY = self.ddY().view4d()
+        partialz = self.ddZ().view4d()
 
-        partialZ[:,:,1:] += -1.j*gz* partialY[:,:,:-1]
-        partialZ[:,:,:-1]+= 1.j* gz* partialY[:,:,1: ]
-        return partialZ
+        if not hasattr(self, 'Tz'):
+            Tz = Tderivatives(self.flowDict)[0]
+        else: Tz = self.Tz
+
+        q0 = epsArr.size
+        # d_z = d_Z + T_z d_Y
+        # {T_z d_Y (.)}_{l,m} = \sum\limits_q  T_z(-q) (._Y)_{l,m+q}
+        # So, when q is, say, 1, T_z(-q)*(d_Y(.))_{l,m+1} is assigned to (...)_{l,m}
+        #   But I have finite 'm', specifically, from -M to M. 
+        #   Due to a 'q', entries from -M+q through M in d_Y(.) are assigned to 
+        #       -M through M-q in d_z(.)
+        #   This goes the other way round for -ve q
+        for q in range(0, q0+1):
+            partialz[0,:,-M:M-q] += Tz[q0-q]*partialY[0,:,-M+q:M]
+        for q in range(-q0,0):
+            partialz[0,:,-M-q:M] += Tz[q0-q]*partialY[0,:,-M:M+q]
+
+
+        return partialz
     
     
     def ddz2(self):
         # If M = 0, it means the only mode is the zero mode, and the derivative would be zero
         if self.nz == 1: return self.zero()
-        # Initiating as above returns a zero-vector
-        # In initialization, a copy of the supplied flowDict is assigned as the object's attribute
-        eps = self.flowDict['eps']; b=self.flowDict['beta'];
+        epsArr = self.flowDict['epsArr']
 
+        # d_zz = d_ZZ + T_zz d_Y + T^2_z d_YY + 2T_z d_YZ (refer to documentation)
         # The first term, d_ZZ(f) is straight-forward:
-        partialz2 = self.ddZ2()
-
-        # Later terms involve multiplying with e^{k.iC}, which is the same as shifting modes by 'k' in the state-vector
-        #   The shift in z-modes is by 'k', but shift in x-modes could be '0' if the state-vector is only resolved in 'z',
-        #       i.e., when L=0. To account for this:
-        # Scratch all that, for riblet geometry, no shift in l
-        lShift =0
-
-        # Group the rest of the terms on the first line as follows:
-        #       e^{iC}.[  -2.i.eps.b.d_ZY(f) + eps.b^2.d_Y(f) ]  + e^{-iC}.[  2.i.eps.b.d_ZY(f)  + eps.b^2.d_Y(f) ]
-        # Step 1: Calculate d_ZY(f) and d_Y(f):
-        tempField1 = self.ddZ().ddY()
-        tempField2 = self.ddY()
+        partialzZ = self.ddZ2()
         
-        # Step 2.1: Add the above fields, multiply by scalars, shift by +1, and add to partialz2
-        sumTemp = -2.j*eps*b*tempField1 + eps*b*b*tempField2
-        partialz2[:, lShift:  ,   1:       ] += sumTemp[:, :self.nx-lShift , :-1 ]
-        # Step 2.2: As step 2.1, but shift by -1:
-        sumTemp = 2.j*eps*b*tempField1 + eps*b*b*tempField2
-        partialz2[:, :self.nx-lShift , :-1 ] += sumTemp[:, lShift:  , 1:         ]
+        partialY = self.ddY()
+        partialYY = self.ddY2()
+        partialYZ = self.ddY().ddZ()
 
-        # Terms on the second line now. First the 1st and 3rd (the ones with shifts)
-        # Computing the field that needs to be shifted
-        tempField = -(eps**2)*(b**2)*self.ddY2()
-        # Adding the field with appropriate shifts:
-        partialz2[:, 2*lShift:     , 2:  ] += tempField[:, :self.nx-2*lShift , :-2]
-        partialz2[ :,:self.nx-2*lShift, :-2] += tempField[:, 2*lShift:      , 2:  ]
+        # T_z is written as \sum\limits_q  T_z(q) e^{iqbz},
+        #   so {T_z d_Y f}_{l,m} = \sum\limits_q  T_z(-q) d_Y f_{l,m+q}
+        # and similarly for the other terms
+        # Tz, Tzz, and Tz2 should be attributes of self,
+        if hasattr(self, 'Tz'):
+            Tz = self.Tz; Tzz = self.Tzz; Tz2 = self.Tz2
+        else:
+            Tz, Tzz, Tz2 = Tderivatives(self.flowDict)
+        # but just in case they aren't,
 
-        # Finally, adding the term 2*g*g*d_YY(f)
-        partialz2 += -2.*tempField
+        q0 = epsArr.size
         
+        # Adding the T_zz d_Y and 2T_z d_YZ terms:
+        for q in range(0, q0+1):
+            partialz2[0,:,-M:M-q] += Tzz[q0-q]*partialY[0,:,-M+q:M]
+            partialz2[0,:,-M:M-q] += 2.*Tz[q0-q]*partialYZ[0,:,-M+q:M]
+        for q in range(-q0,0):
+            partialz2[0,:,-M-q:M] += Tzz[q0-q]*partialY[0,:,-M:M+q]
+            partialz2[0,:,-M-q:M] += 2.*Tz[q0-q]*partialYZ[0,:,-M:M+q]
+        # Tz2 term is a bit different since it has 4*epsArr.size+1 elements
+        q0 = 2*q0
+        for q in range(0, q0+1):
+            partialz2[0,:,-M:M-q] += Tz2[q0-q]*partialYY[0,:,-M+q:M]
+        for q in range(-q0,0):
+            partialz2[0,:,-M-q:M] += Tz2[q0-q]*partialYY[0,:,-M:M+q]
+
+        # And we're done..... 
+
         return partialz2
     
 
@@ -742,4 +783,46 @@ class flowFieldRiblet(flowFieldWavy):
 
 
 
+def Tderivatives(flowDict,complexType=np.complex128):
+    if 'epsArr' in flowDict:    
+        epsArr = np.float32(flowDict['epsArr'] )
+    else:
+        epsArr = np.array([flowDict['eps']], dtype=np.float32)
+    b = flowDict['beta']; b2 = b**2
+    # Populating arrays T_z(q), T_zz(q), and T^2_z(q)
+    Tz = np.zeros(2*epsArr.size+1, dtype=complexType)
+    qArr = np.arange(-epsArr.size, epsArr.size+1)
+    eArr = qArr.copy()
+    eArr[:epsArr.size] = epsArr[::-1]
+    eArr[-epsArr.size:] = epsArr
+    # eArr represents epsArr, but extending form -ve to 0 to +ve instead of just +ve
+    if complexType is np.complex64:
+        qArr = np.float32(qArr); eArr = np.float32(eArr)
+    Tzz = Tz.copy();    Tz2 = Tz.copy()
+
+    Tz[:] = -1.j*b*qArr*eArr
+    Tzz[:] = b2 * qArr**2 * eArr
+
+    # I derived Tz2 assuming three modes, so I'll just go with it instead of generalizing now
+    # tmpArr represents (eps_0=0, eps_1, eps_2, eps_3)
+    tmpArr = np.zeros(4,dtype=np.float32)
+    tmpArr[1:epsArr.size+1] = epsArr
+    
+    assert epsArr.size <= 3, "The expression below for Tz2 is only valid for upto eps_3"
+    # tmpArr2 represents Tz2 when three modes are presents. tmpArr2[0] is for e^0ibZ, 
+    #       and tmpArr2[6] is for e^6ibZ. Entries for positive and negative modes remain the same
+    tmpArr2 = np.zeros(7,dtype=np.float32)
+    tmpArr2[0] = 2.*(-9.*tmpArr[3]**2  - 4.*tmpArr[2]**2  - tmpArr[1]**2 )
+    tmpArr2[1] = -12.*tmpArr[2]*tmpArr[3]  - 4.*tmpArr[1]*tmpArr[2]
+    tmpArr2[2] = -6.*tmpArr[1]*tmpArr[3] + tmpArr[1]**2
+    tmpArr2[3] = 4.*tmpArr[1]*tmpArr[2]
+    tmpArr2[4] = 6.*tmpArr[1]*tmpArr[3] + 4.*tmpArr[2]**2
+    tmpArr2[5] = 12.*tmpArr[2]*tmpArr[3]
+    tmpArr2[6] = 9.*tmpArr[3]**2
+
+    tmpArr2 = -b2 * tmpArr2[1:epsArr.size+1]
+    Tz2[:epsArr.size] = tmpArr2[::-1]
+    Tz2[-epsArr.size:] = tmpArr2
+    del tmpArr,tmpArr2
+    return Tz, Tzz, Tz2
 
