@@ -30,8 +30,7 @@ def mat2ff(arr=None, **kwargs):
     pDict = tempDict.copy(); pDict['nd']= 1; pDict['isPois'] = -1
     pField = flowFieldWavy(flowDict=pDict)
     for k in range(2*n+1):
-        vField[0,k*xind, k*zind] = arr[k,:3]
-        pField[0,k*xind, k*zind] = arr[k,3:]
+        vField[0,k*xind, k*zind] = arr[k,:3]; pField[0,k*xind, k*zind] = arr[k,3:]
 
     
     return vField, pField
@@ -547,9 +546,9 @@ class flowFieldWavy(flowField):
         """
         L = self.flowDict['L']
         M = self.flowDict['M']
-        if L != 0: Lnew = L+2
+        if L != 0: Lnew = L+5
         else: Lnew = L
-        if M != 0: Mnew = M+2
+        if M != 0: Mnew = M+5
         else: Mnew = M
         vf = self.slice(L=Lnew, M=Mnew)
         if pField is None:
@@ -657,11 +656,11 @@ class flowFieldRiblet(flowFieldWavy):
         """
         flowFieldWavy.verify(self)
         if ('epsArr' in self.flowDict):
-            if not (isinstance(epsArr,np.ndarray)): 
+            if not (isinstance(self.flowDict['epsArr'],np.ndarray)): 
                 warn("flowDict['epsArr'] is not a numpy array. Fix this.")
             self.flowDict['epsArr'] = np.float32(self.flowDict['epsArr'])
         else:
-            self.flowDict['epsArr'] = np.array([self.flowDict['eps']],dtype=np.float32)
+            self.flowDict['epsArr'] = np.array([0.,self.flowDict['eps']],dtype=np.float32)
 
         return
 
@@ -673,6 +672,7 @@ class flowFieldRiblet(flowFieldWavy):
         return self.ddX2()
     
     def ddz(self):
+        M = self.flowDict['M']
         self.verify()   # Ensure 'epsArr' exists in self.flowDict
         epsArr = self.flowDict['epsArr']
         if self.nz == 1:
@@ -684,7 +684,8 @@ class flowFieldRiblet(flowFieldWavy):
             Tz = Tderivatives(self.flowDict)[0]
         else: Tz = self.Tz
 
-        q0 = epsArr.size
+
+        q0 = epsArr.size-1
         # d_z = d_Z + T_z d_Y
         # {T_z d_Y (.)}_{l,m} = \sum\limits_q  T_z(-q) (._Y)_{l,m+q}
         # So, when q is, say, 1, T_z(-q)*(d_Y(.))_{l,m+1} is assigned to (...)_{l,m}
@@ -693,10 +694,9 @@ class flowFieldRiblet(flowFieldWavy):
         #       -M through M-q in d_z(.)
         #   This goes the other way round for -ve q
         for q in range(0, q0+1):
-            partialz[0,:,-M:M-q] += Tz[q0-q]*partialY[0,:,-M+q:M]
+            partialz[0,:,:self.nz-q] += Tz[q0-q]*partialY[0,:,q:]
         for q in range(-q0,0):
-            partialz[0,:,-M-q:M] += Tz[q0-q]*partialY[0,:,-M:M+q]
-
+            partialz[0,:,-q:] += Tz[q0-q]*partialY[0,:,:self.nz+q]
 
         return partialz
     
@@ -705,10 +705,11 @@ class flowFieldRiblet(flowFieldWavy):
         # If M = 0, it means the only mode is the zero mode, and the derivative would be zero
         if self.nz == 1: return self.zero()
         epsArr = self.flowDict['epsArr']
+        M = self.flowDict['M']
 
         # d_zz = d_ZZ + T_zz d_Y + T^2_z d_YY + 2T_z d_YZ (refer to documentation)
         # The first term, d_ZZ(f) is straight-forward:
-        partialzZ = self.ddZ2()
+        partialz2 = self.ddZ2()
         
         partialY = self.ddY()
         partialYY = self.ddY2()
@@ -724,21 +725,21 @@ class flowFieldRiblet(flowFieldWavy):
             Tz, Tzz, Tz2 = Tderivatives(self.flowDict)
         # but just in case they aren't,
 
-        q0 = epsArr.size
+        q0 = epsArr.size-1
         
         # Adding the T_zz d_Y and 2T_z d_YZ terms:
         for q in range(0, q0+1):
-            partialz2[0,:,-M:M-q] += Tzz[q0-q]*partialY[0,:,-M+q:M]
-            partialz2[0,:,-M:M-q] += 2.*Tz[q0-q]*partialYZ[0,:,-M+q:M]
+            partialz2[0,:,:self.nz-q] += Tzz[q0-q]*partialY[0,:,q:]
+            partialz2[0,:,:self.nz-q] += 2.*Tz[q0-q]*partialYZ[0,:,q:]
         for q in range(-q0,0):
-            partialz2[0,:,-M-q:M] += Tzz[q0-q]*partialY[0,:,-M:M+q]
-            partialz2[0,:,-M-q:M] += 2.*Tz[q0-q]*partialYZ[0,:,-M:M+q]
+            partialz2[0,:,-q:] += Tzz[q0-q]*partialY[0,:,:self.nz+q]
+            partialz2[0,:,-q:] += 2.*Tz[q0-q]*partialYZ[0,:,:self.nz+q]
         # Tz2 term is a bit different since it has 4*epsArr.size+1 elements
         q0 = 2*q0
         for q in range(0, q0+1):
-            partialz2[0,:,-M:M-q] += Tz2[q0-q]*partialYY[0,:,-M+q:M]
+            partialz2[0,:,:self.nz-q] += Tz2[q0-q]*partialYY[0,:,q:]
         for q in range(-q0,0):
-            partialz2[0,:,-M-q:M] += Tz2[q0-q]*partialYY[0,:,-M:M+q]
+            partialz2[0,:,-q:] += Tz2[q0-q]*partialYY[0,:,:self.nz+q]
 
         # And we're done..... 
 
@@ -747,7 +748,15 @@ class flowFieldRiblet(flowFieldWavy):
 
     def saveh5fName(self,fNamePrefix='ribEq1',prefix='solutions/ribEq/'):
         fName = 'L'+str(self.flowDict['L'])+'M'+str(self.flowDict['M'])+'N'+str(self.flowDict['N'])
-        fName = fName + 'E'+ '%04d' %(int( round(self.flowDict['eps']*1.0e4))) + '.hdf5'
+        if 'epsArr' in self.flowDict:
+            epsArr = self.flowDict['epsArr']
+        else:
+            epsArr = np.array([0.,self.flowDict['eps']])
+        epsStr = ''
+        for q in range(epsArr.size):
+            if q != 0:
+                epsStr += 'E%d_%03d'%(q,1000.*round(epsArr[q],3))
+        fName = fName + epsStr + '.hdf5'
 
         fName = fNamePrefix + fName
         return fName , prefix
@@ -784,31 +793,37 @@ class flowFieldRiblet(flowFieldWavy):
 
 
 def Tderivatives(flowDict,complexType=np.complex128):
+    # First entry of epsArr is the amplitude of zeroth groove-mode, and is set to zero
+    
     if 'epsArr' in flowDict:    
         epsArr = np.float32(flowDict['epsArr'] )
+        if epsArr[0] != 0.:
+            print("epsArr is", epsArr)
+            warn('eps_0 is not zero. The code becomes inconsistent when it is not. Have a look.')
     else:
-        epsArr = np.array([flowDict['eps']], dtype=np.float32)
+        epsArr = np.array([0.,flowDict['eps']], dtype=np.float32)
     b = flowDict['beta']; b2 = b**2
+    q0 = epsArr.size-1
     # Populating arrays T_z(q), T_zz(q), and T^2_z(q)
-    Tz = np.zeros(2*epsArr.size+1, dtype=complexType)
-    qArr = np.arange(-epsArr.size, epsArr.size+1)
-    eArr = qArr.copy()
-    eArr[:epsArr.size] = epsArr[::-1]
-    eArr[-epsArr.size:] = epsArr
+    complexType=np.complex128
+    Tz = np.zeros(2*q0+1, dtype=complexType)
+    qArr = np.arange(-q0, q0+1)
+    eArr = np.zeros(2*q0+1,dtype=complexType)
+    eArr[:q0+1] = epsArr[::-1]
+    eArr[-q0:] = epsArr[1:]
     # eArr represents epsArr, but extending form -ve to 0 to +ve instead of just +ve
     if complexType is np.complex64:
         qArr = np.float32(qArr); eArr = np.float32(eArr)
-    Tzz = Tz.copy();    Tz2 = Tz.copy()
+    Tzz = Tz.copy()
 
     Tz[:] = -1.j*b*qArr*eArr
     Tzz[:] = b2 * qArr**2 * eArr
-
-    # I derived Tz2 assuming three modes, so I'll just go with it instead of generalizing now
-    # tmpArr represents (eps_0=0, eps_1, eps_2, eps_3)
-    tmpArr = np.zeros(4,dtype=np.float32)
-    tmpArr[1:epsArr.size+1] = epsArr
     
-    assert epsArr.size <= 3, "The expression below for Tz2 is only valid for upto eps_3"
+    tmpArr = np.zeros(4,dtype=np.float32)
+    tmpArr[:q0+1] = epsArr
+    # Following code uses name tmpArr instead of epsArr, because earlier, epsArr[0]
+    #   referred to eps_1, which was a stupid thing to have
+    assert epsArr.size <= 4, "The expression below for Tz2 is only valid for upto eps_3"
     # tmpArr2 represents Tz2 when three modes are presents. tmpArr2[0] is for e^0ibZ, 
     #       and tmpArr2[6] is for e^6ibZ. Entries for positive and negative modes remain the same
     tmpArr2 = np.zeros(7,dtype=np.float32)
@@ -819,10 +834,14 @@ def Tderivatives(flowDict,complexType=np.complex128):
     tmpArr2[4] = 6.*tmpArr[1]*tmpArr[3] + 4.*tmpArr[2]**2
     tmpArr2[5] = 12.*tmpArr[2]*tmpArr[3]
     tmpArr2[6] = 9.*tmpArr[3]**2
+    
+    Tz2 = np.zeros(13, dtype=complexType)
+    tmpArr2 = -b2 * tmpArr2
+    Tz2[:7] = tmpArr2[::-1]
+    Tz2[-6:] = tmpArr2[1:]
 
-    tmpArr2 = -b2 * tmpArr2[1:epsArr.size+1]
-    Tz2[:epsArr.size] = tmpArr2[::-1]
-    Tz2[-epsArr.size:] = tmpArr2
+    Tz2 = Tz2[(6-2*q0):(6+2*q0+1)]
+
     del tmpArr,tmpArr2
     return Tz, Tzz, Tz2
 

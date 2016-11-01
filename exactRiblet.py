@@ -1,7 +1,7 @@
 import numpy as np
 from flowFieldWavy import *
-import laminar as lam
 import scipy.integrate as spint
+import sys
 
 tol = 1.0e-13
 linTol = 1.0e-10
@@ -39,7 +39,7 @@ def dict2ff(flowDict):
     return vf
 
 
-def linr(flowDict,complexType = np.complex,epsArr=np.array([0.05,0.,0.])): 
+def linr(flowDict,complexType = np.complex): 
     """Returns matrix representing the linear operator for the equilibria/TWS for riblet case
     Linear operator for exact solutions isn't very different from that for laminar, 
         all inter-modal interaction remains the same for a fixed 'l'. 
@@ -53,7 +53,11 @@ def linr(flowDict,complexType = np.complex,epsArr=np.array([0.05,0.,0.])):
                             First element is eps_1, and so on... 
     Outputs:
         Lmat:   Matrix representing linear terms for the complete state-vectors"""
-    if epsArr.ndim !=0: warn("epsArr is not a 1-D array. Fix this.")
+    if 'epsArr' in flowDict:
+        epsArr = flowDict['epsArr']
+        if epsArr.ndim !=1: warn("epsArr is not a 1-D array. Fix this.")
+    else:
+        epsArr = np.array([0., flowDict['eps']])
     if False:
         assert flowDict['L'] != 0 and flowDict['M'] != 0
         if flowDict['L'] > 4: 
@@ -73,6 +77,7 @@ def linr(flowDict,complexType = np.complex,epsArr=np.array([0.05,0.,0.])):
     Re = flowDict['Re']
 
     N  = int(flowDict['N']); N4 = 4*N
+    y,DM = chebdif(N,2)
     if complexType is np.complex64:
         DM = np.float32(DM)
     D = DM[:,:,0].reshape((N,N)); D2 = DM[:,:,1].reshape((N,N))
@@ -83,11 +88,11 @@ def linr(flowDict,complexType = np.complex,epsArr=np.array([0.05,0.,0.])):
     def _assignL0flat(L0flat,m):
         assert (L0flat.shape[0] == N4) and (L0flat.shape[1] == N4)
         # L_0,flat is built for the case of L= 0 without accounting for wall effects. 
-        L0flat[:,:] = np.vstack(
-                np.hstack( -(-m**2 * b2 * I + D2)/Re,  Z,  Z,  Z   ),
-                np.hstack( Z,  -(-m**2 * b2 * I + D2)/Re,  Z,  D   ),
-                np.hstack( Z,  Z,  -(-m**2 * b2 * I + D2)/Re, 1.j*m*b*I ),
-                np.hstack( Z,  D,  1.j*m*b*I,  Z)       )
+        L0flat[:,:] = np.vstack((
+                np.hstack(( -(-m**2 * b2 * I + D2)/Re,  Z,  Z,  Z   )),
+                np.hstack(( Z,  -(-m**2 * b2 * I + D2)/Re,  Z,  D   )),
+                np.hstack(( Z,  Z,  -(-m**2 * b2 * I + D2)/Re, 1.j*m*b*I )),
+                np.hstack(( Z,  D,  1.j*m*b*I,  Z))       ))
         # First row-block is streamwise momentum equation, diffusion term. 
         #       Pressure term isn't set because it's zero for l=0
         # Second is wall-normal momentum
@@ -98,31 +103,41 @@ def linr(flowDict,complexType = np.complex,epsArr=np.array([0.05,0.,0.])):
 
     Tz, Tzz, Tz2 = Tderivatives(updateDict(flowDict,{'epsArr':epsArr})) 
     
-    # Number of columns is increased by 2*epsArr.size because wall effects produce
-    #   interactions all the way from -M-epsArr.size to M+epsArr.size
+    q0 = epsArr.size-1
+    # -1 because epsArr includes zeroth mode
+
+    # Number of columns is increased by 4*q0 because wall effects produce
+    #   interactions all the way from -M-2*q0 to M+2*q0
     #   I prefer to build the matrix with these included, and then truncate to -M to M
-    L0wavy = np.zeros((nz*N4, (nz+2*epsArr.size)*N4), dtype=complexType)
+    L0wavy = np.zeros((nz*N4, (nz+4*q0)*N4), dtype=complexType)
     # Wall effects show up in spanwise derivatives only
     # d_z (.) = (-imb)(.) + \sum\limits_q  (T_{z,-q} D) (.)_{l,m+q}
     # d_zz (.) = (-m^2 b^2)(.) + \sum\limits_q \{(T_{zz,-q} + 2i(m+q)bT_{z,-q})D + T^2_{z,-q} D^2\} (.)_{l,m+q}
-    q0 = epsArr.size
     for mp in range(nz):
         m = mp-M
-        _assignL0flat(L0wavy[mp*N4:(mp+1)*N4, (mp+q0)*N4:(mp+q0+1)*N4], m)
-        # The principal diagonal is shifted by q0=epsArr.size 
+        _assignL0flat(L0wavy[mp*N4:(mp+1)*N4, (mp+2*q0)*N4:(mp+2*q0+1)*N4], m)
+        # The principal diagonal is shifted by 2*q0= 2*(epsArr.size-1) 
 
         # Wall-effects enter into the equations as
         #   T_z(-q) * (.)_{l,m+q}
         # Factor of u_{l,m+q} is supposed to be on the q^th diagonal,
-        #   however, since I add extra (epsArr.size) column-blocks on either end,
-        #   this factor must be on (q+epsArr.size)^th diagonal
-        for q in range(-epsArr.size, epsArr.size+1):
-            L0wavy[mp*N4:(mp+1)*N4, (mp+q+q0)*N4: (mp+q+q0+1)*N4] += np.vstack(
-                    np.hstack( -1./Re*( (Tzz[-q+q0] + 2.j*(m+q)*b*Tz[-q+q0])*D + Tz2[-q+q0]*D2), Z, Z, Z),
-                    np.hstack( Z, -1./Re*( (Tzz[-q+q0] + 2.j*(m+q)*b*Tz[-q+q0])*D + Tz2[-q+q0]*D2), Z, Z ), 
-                    np.hstack( Z, Z, -1./Re*( (Tzz[-q+q0] + 2.j*(m+q)*b*Tz[-q+q0])*D + Tz2[-q+q0]*D2), Tz[-q+q0]*D ), 
-                    np.hstack(Z, Z, Tz[-q+q0]*D, Z)     )
-    L0wavy = L0wavy[:, N4*q0: -N4*q0]   # Getting rid of the extra column-blocks
+        #   however, since I add extra 2*q0 column-blocks on either end,
+        #   this factor must be on (q+2*q0)^th diagonal
+        for q in range(-q0, q0+1):
+            L0wavy[mp*N4:(mp+1)*N4, (mp+q+2*q0)*N4: (mp+q+2*q0+1)*N4] += np.vstack((
+                    np.hstack(( -1./Re*( (Tzz[-q+q0] + 2.j*(m+q)*b*Tz[-q+q0])*D) , Z, Z, Z)),
+                    np.hstack(( Z, -1./Re*( (Tzz[-q+q0] + 2.j*(m+q)*b*Tz[-q+q0])*D) , Z, Z )), 
+                    np.hstack(( Z, Z, -1./Re*( (Tzz[-q+q0] + 2.j*(m+q)*b*Tz[-q+q0])*D), Tz[-q+q0]*D )), 
+                    np.hstack((Z, Z, Tz[-q+q0]*D, Z))     ))
+        # In the above matrices, I did not include Tz2 terms, that's because 
+        #   Tz2 goes from -2*q0 to 2*q0. I add it separately below?
+        for q in range(-2*q0, 2*q0+1):
+            L0wavy[mp*N4:(mp+1)*N4, (mp+q+2*q0)*N4: (mp+q+2*q0+1)*N4] += np.vstack((
+                    np.hstack(( -1./Re*(Tz2[-q+2*q0]*D2), Z, Z, Z)),
+                    np.hstack(( Z, -1./Re*( Tz2[-q+2*q0]*D2), Z, Z )), 
+                    np.hstack(( Z, Z, -1./Re*(Tz2[-q+2*q0]*D2),Z )), 
+                    np.hstack((Z, Z, Z, Z))     ))
+    L0wavy = L0wavy[:, N4*2*q0: -N4*2*q0]   # Getting rid of the extra column-blocks
     # And that concludes building L0wavy
 
     # For exact solutions, we have L!= 0
@@ -172,99 +187,198 @@ def linr(flowDict,complexType = np.complex,epsArr=np.array([0.05,0.,0.])):
 
 
 
-def jcbn(vf):
-    eps = vf.flowDict['eps']; a = vf.flowDict['alpha']; b = vf.flowDict['beta']
-    N = vf.N; L = vf.nx//2; M = vf.nz//2
+def jcbn(vf,Lmat=None):
+    if Lmat is None:
+        warn('The Jacobian is added in-place to Lmat. Always supply Lmat. Returning.....')
+        return
+    a = vf.flowDict['alpha']; b = vf.flowDict['beta']
+    epsArr = vf.flowDict['epsArr']
+    q0 = epsArr.size-1
+    Tz = Tderivatives(vf.flowDict)[0]
+    N = vf.N; L = vf.nx//2; M = vf.nz//2; N4 = 4*N
+
+    # No reason to keep accessing flowFieldRiblet with all its extra machinery
+    #   Copy elements to a regular numpy array instead
     vfArr = vf.view4d().copyArray()
     u = vfArr[0,:,:,0]; v = vfArr[0,:,:,1]; w = vfArr[0,:,:,2]
     vfyArr = vf.ddy().view4d().copyArray()
     uy = vfyArr[0,:,:,0]; vy = vfyArr[0,:,:,1]; wy = vfyArr[0,:,:,2]
+    # The state-vectors aren't that big, so memory isn't an issue
 
-    D = vf.D; I = np.identity(vf.N, dtype=np.complex); Z = np.zeros((vf.N,vf.N),dtype=np.complex)
+    D = vf.D; I = np.identity(vf.N, dtype=Lmat.dtype); Z = np.zeros((vf.N,vf.N),dtype=Lmat.dtype)
+    D.astype(Lmat.dtype)
 
     # Index of the first row/column of the block for any wavenumber vector (l,m)
     iFun = lambda l,m: (l+L)*(vf.nz*4*N) + (m+M)*4*N
     
-    G = np.zeros((vf.nx*vf.nz*4*N, vf.nx*vf.nz*4*N),dtype=np.complex)
+    G = Lmat
+    assert (G.shape[0] == (L+1)*vf.nz*4*N) and (G.shape[1] == (L+1)*vf.nz*4*N)
+
     # I will be using the functions np.diag() and np.dot() quite often, so,
     diag = np.diag; dot = np.dot
-    # And these scalars: 
-    ieb = 1.j*eps*b; ia = 1.j*a; ib = 1.j*b
 
-    for l in range(-L,L+1):
+    # I am deviating from my earlier implementation of defining G to revert to
+    #   the implementation used for the laminar case
+    # The two ways to do it is this: 
+    #   1) Go through each row-column-block of the matrix and figure out which 
+    #           u_{l,m} goes there (along with factors for derivatives)
+    #   2) Loop over (l,m), get the u_{l,m} and d_y(u_{l,m})
+    #       Then, go through row-blocks and assign this u_lm to the appropriate column
+    # The first approach is the simpler one. The second is a bit more complex, but
+    #   involves one loop fewer. I'm going with the second one, but not for the performance
+    # Since I am only building G for non-positive 'l', it's easier if I go with the second
+
+    # This is the notation I shall use:
+    # l', m' (written in code as lp, mp) represent the mode numbers of the modes that I
+    #   first loop through. That is, I loop over l',m' and populate G with u_{l',m'}
+    # l , m represent the mode for which the equation is written
+    #   I use phi_lm to represent the convection term in the NSE for mode (l,m)
+    #   phi^1 is streamwise convection term: phi^1 = u d_x u + v d_y u + w d_z u
+    #   phi^2 is wall-normal, phi^3 is spanwise
+    # So, the wave-triads go as { (l', m'), (l,m), (l-l',m-m')} (for terms not involving wall-effects)
+    #   u_{l',m'} is populated in row-block corresponding to phi_{l,m} in column-block for u_{l-l',m-m'}
+
+    # Strictly speaking, what I'm building is not the Jacobian G
+    # I'm building G such that N(\chi) = 0.5 * G * \chi, where \chi is the state-vector
+    # In earlier implementations, G differed from the Jacobian of N only in terms of
+    #                           d/du (u') being written as D instead of u''/ u' (which might produces NaNs)
+    # This time, ignoring l > 0 in the state-vector causes greater deviations for G from the true Jacobian
+    # For now, I shall ignore all this until I see convergence issues.
+    #   Using a modified Jacobian isn't necessarily a bad thing anyway.
+
+    # What the above comments mean is, I will split the below looping into two cases:
+    # For a term in phi, u_l'm' * u_{l-l',m-m'}, if both l' and l-l' are > 0, it is accounted for  
+    #   by populating the l-l',m-m' column-block with 2*u_{l',m'} (or vice-versa),
+    #   so that 0.5* G * \chi returns phi_{l,m}
+    # When both l' and l-l' are <=0, the corresponding term is split into 
+    #   {0.5*u_{l',m'}} *u_{l-l',m-m'} + {0.5*u_{l-l',m-m'} } * u_{l',m'},
+    #   and twice the factors in the curly braces go into the appropriate column-blocks of G
+    # This is a really hacky way to do the whole thing, but if it works, that's all that matters.
+
+    # Final piece of notation: 
+    ia = 1.j*a; ib = 1.j*b
+
+    for l in range(-L,1):
         for m in range(-M,M+1):
             # Index of first row in the block for equations for wavenumbers (l,m)
             rInd = iFun(l,m)
             # l1,m2 are the wavenumbers in phi^j_{lm}
-            for lp in range(-L,L+1):
+            for lp in range(-L,l):
+                # For these lp,   l-lp must be >0
+                # So the u_{l-l', m-m'} must have l-l' >0,
+                #   meaning they are populated as 2*u_{l-l',m-m'}
                 for mp in range(-M,M+1):
                     cInd = iFun(lp,mp)
-                    # lp,mp are the wavenumbers for the velocities contributing to phi^j_{lm}, 
-                    #   The non-linear Jacobian contains modes with wavenumbers (l-lp,m-mp), and a few (l-lp,m-mp-1) and (l-lp,m-mp+1)
                     if (-L <= (l-lp) <= L):
                         li = l-lp+L # Array index for streamwise wavenumber l-lp
+
+                        # First, all the terms not relating to wall-effects
                         if (-M <= (m-mp) <= M):
                             mi = m-mp+M # Array index for spanwise wavenumber m-mp
                             # phi^1_{l,m}: factors of terms with  u_{lp,mp}:
                             G[ rInd+0*N : rInd+1*N , cInd+0*N : cInd+1*N ] += \
-                                    l*ia* diag(u[li, mi])  + v[li,mi].reshape((N,1)) *D + diag(w[li,mi])*mp*ib 
+                                    2.*( l*ia* diag(u[li, mi])  + v[li,mi].reshape((N,1)) *D + diag(w[li,mi])*mp*ib )
                             # phi^1_{l,m}: factors of terms with  v_{lp,mp}:
-                            G[ rInd+0*N : rInd+1*N , cInd+1*N : cInd+2*N ] += diag(uy[li, mi])
+                            G[ rInd+0*N : rInd+1*N , cInd+1*N : cInd+2*N ] += 2.*(diag(uy[li, mi]))
                             # phi^1_{l,m}: factors of terms with  w_{lp,mp}:
-                            G[ rInd+0*N : rInd+1*N , cInd+2*N : cInd+3*N ] += (m-mp)*ib*diag(u[li, mi])
+                            G[ rInd+0*N : rInd+1*N , cInd+2*N : cInd+3*N ] += 2.*((m-mp)*ib*diag(u[li, mi]))
 
                             # phi^2_{l,m}: factors of terms with  v_{lp,mp}:
                             G[ rInd+1*N : rInd+2*N , cInd+1*N : cInd+2*N ] += \
-                                    lp*ia* diag(u[li, mi])  + v[li,mi].reshape((N,1)) *D + diag(w[li,mi])*mp*ib \
-                                    + diag(vy[li,mi])
+                                    2.* (    lp*ia* diag(u[li, mi])  + v[li,mi].reshape((N,1)) *D + diag(w[li,mi])*mp*ib \
+                                    + diag(vy[li,mi])   )
                             # phi^2_{l,m}: factors of terms with  u_{lp,mp}:
-                            G[ rInd+1*N : rInd+2*N , cInd+0*N : cInd+1*N ] += (l-lp)*ia*diag(v[li, mi])
+                            G[ rInd+1*N : rInd+2*N , cInd+0*N : cInd+1*N ] += 2.*  ((l-lp)*ia*diag(v[li, mi])  )
                             # phi^2_{l,m}: factors of terms with  w_{lp,mp}:
-                            G[ rInd+1*N : rInd+2*N , cInd+2*N : cInd+3*N ] += (m-mp)*ib*diag(v[li, mi])
+                            G[ rInd+1*N : rInd+2*N , cInd+2*N : cInd+3*N ] += 2.*  ((m-mp)*ib*diag(v[li, mi])  )
 
                             # phi^3_{l,m}: factors of terms with  w_{lp,mp}:
                             G[ rInd+2*N : rInd+3*N , cInd+2*N : cInd+3*N ] += \
-                                    lp*ia* diag(u[li, mi])  + v[li,mi].reshape((N,1)) *D + m*ib*diag(w[li,mi]) 
+                                    2.*(  lp*ia* diag(u[li, mi])  + v[li,mi].reshape((N,1)) *D + m*ib*diag(w[li,mi])  )
                             # phi^3_{l,m}: factors of terms with  v_{lp,mp}:
-                            G[ rInd+2*N : rInd+3*N , cInd+1*N : cInd+2*N ] += diag(wy[li, mi])
+                            G[ rInd+2*N : rInd+3*N , cInd+1*N : cInd+2*N ] += 2.*(   diag(wy[li, mi]) )
                             # phi^3_{l,m}: factors of terms with  u_{lp,mp}:
-                            G[ rInd+2*N : rInd+3*N , cInd+0*N : cInd+1*N ] += (l-lp)*ia*diag(w[li, mi])
+                            G[ rInd+2*N : rInd+3*N , cInd+0*N : cInd+1*N ] += 2.*(   (l-lp)*ia*diag(w[li, mi])  )
 
-                        if (-M <= (m-mp-1) <= M):
-                            mi = m-mp-1+M # Array index for spanwise wavenumber m-mp
-                            # phi^1_{l,m}: factors of terms with u_{lp,mp}
-                            G[ rInd+0*N : rInd+1*N , cInd+0*N : cInd+1*N ] += -ieb* w[li,mi].reshape((N,1)) * D 
-                            # phi^1_{l,m}: factors of terms with w_{lp,mp}
-                            G[ rInd+0*N : rInd+1*N , cInd+2*N : cInd+3*N ] += -ieb* diag(uy[li,mi]) 
+                        # Now, the terms arising due to wall effects
+                        # The interactions in l are unaffected since Tz only have e^iqb
 
-                            # phi^2_{l,m}: factors of terms with v_{lp,mp}
-                            G[ rInd+1*N : rInd+2*N , cInd+1*N : cInd+2*N ] += -ieb* w[li,mi].reshape((N,1)) * D 
-                            # phi^2_{l,m}: factors of terms with w_{lp,mp}
-                            G[ rInd+1*N : rInd+2*N , cInd+2*N : cInd+3*N ] += -ieb* diag(vy[li,mi]) 
+                        for q in range(-q0,q0+1):
 
-                            # phi^3_{l,m}: factors of terms with w_{lp,mp}
-                            G[ rInd+2*N : rInd+3*N , cInd+2*N : cInd+3*N ] += -ieb* w[li,mi].reshape((N,1)) * D \
-                                    -ieb* diag(wy[li,mi]) 
+                            if (-M <= (m-mp+q) <= M):
+                                mi = m-mp+q+M # Array index for spanwise wavenumber m-mp
+                                # phi^1_{l,m}: factors of terms with u_{lp,mp}
+                                G[ rInd+0*N : rInd+1*N , cInd+0*N : cInd+1*N ] += 2.*Tz[q0-q]* w[li,mi].reshape((N,1)) * D 
+                                # phi^1_{l,m}: factors of terms with w_{lp,mp}
+                                G[ rInd+0*N : rInd+1*N , cInd+2*N : cInd+3*N ] += 2.*Tz[q0-q]* diag(uy[li,mi]) 
+
+                                # phi^2_{l,m}: factors of terms with v_{lp,mp}
+                                G[ rInd+1*N : rInd+2*N , cInd+1*N : cInd+2*N ] += 2.*Tz[q0-q]* w[li,mi].reshape((N,1)) * D 
+                                # phi^2_{l,m}: factors of terms with w_{lp,mp}
+                                G[ rInd+1*N : rInd+2*N , cInd+2*N : cInd+3*N ] += 2.*Tz[q0-q]* diag(vy[li,mi]) 
+
+                                # phi^3_{l,m}: factors of terms with w_{lp,mp}
+                                G[ rInd+2*N : rInd+3*N , cInd+2*N : cInd+3*N ] += 2.*Tz[q0-q]* w[li,mi].reshape((N,1)) * D \
+                                        +2.*Tz[q0-q]* diag(wy[li,mi]) 
  
-                        if (-M <= (m-mp+1) <= M):
-                            mi = m-mp+1+M # Array index for spanwise wavenumber m-mp
-                            # phi^1_{l,m}: factors of terms with u_{lp,mp}
-                            G[ rInd+0*N : rInd+1*N , cInd+0*N : cInd+1*N ] += ieb* w[li,mi].reshape((N,1)) * D 
-                            # phi^1_{l,m}: factors of terms with w_{lp,mp}
-                            G[ rInd+0*N : rInd+1*N , cInd+2*N : cInd+3*N ] += ieb* diag(uy[li,mi]) 
+            # Repeating the above for lp >= l, so that both lp and l-lp are <= 0                        
+            for lp in range(l,1):
+                for mp in range(-M,M+1):
+                    cInd = iFun(lp,mp)
+                    if (-L <= (l-lp) <= L):
+                        li = l-lp+L # Array index for streamwise wavenumber l-lp
 
-                            # phi^2_{l,m}: factors of terms with v_{lp,mp}
-                            G[ rInd+1*N : rInd+2*N , cInd+1*N : cInd+2*N ] += ieb* w[li,mi].reshape((N,1)) * D 
-                            # phi^2_{l,m}: factors of terms with w_{lp,mp}
-                            G[ rInd+1*N : rInd+2*N , cInd+2*N : cInd+3*N ] += ieb* diag(vy[li,mi]) 
+                        # First, all the terms not relating to wall-effects
+                        if (-M <= (m-mp) <= M):
+                            mi = m-mp+M # Array index for spanwise wavenumber m-mp
+                            # phi^1_{l,m}: factors of terms with  u_{lp,mp}:
+                            G[ rInd+0*N : rInd+1*N , cInd+0*N : cInd+1*N ] += \
+                                    ( l*ia* diag(u[li, mi])  + v[li,mi].reshape((N,1)) *D + diag(w[li,mi])*mp*ib )
+                            # phi^1_{l,m}: factors of terms with  v_{lp,mp}:
+                            G[ rInd+0*N : rInd+1*N , cInd+1*N : cInd+2*N ] += (diag(uy[li, mi]))
+                            # phi^1_{l,m}: factors of terms with  w_{lp,mp}
+                            G[ rInd+0*N : rInd+1*N , cInd+2*N : cInd+3*N ] += ((m-mp)*ib*diag(u[li, mi]))
 
-                            # phi^3_{l,m}: factors of terms with w_{lp,mp}
-                            G[ rInd+2*N : rInd+3*N , cInd+2*N : cInd+3*N ] += ieb* w[li,mi].reshape((N,1)) * D \
-                                    +ieb* diag(wy[li,mi]) 
-                                    
+                            # phi^2_{l,m}: factors of terms with  v_{lp,mp}:
+                            G[ rInd+1*N : rInd+2*N , cInd+1*N : cInd+2*N ] += \
+                                    (    lp*ia* diag(u[li, mi])  + v[li,mi].reshape((N,1)) *D + diag(w[li,mi])*mp*ib \
+                                    + diag(vy[li,mi])   )
+                            # phi^2_{l,m}: factors of terms with  u_{lp,mp}:
+                            G[ rInd+1*N : rInd+2*N , cInd+0*N : cInd+1*N ] += ((l-lp)*ia*diag(v[li, mi])  )
+                            # phi^2_{l,m}: factors of terms with  w_{lp,mp}:
+                            G[ rInd+1*N : rInd+2*N , cInd+2*N : cInd+3*N ] += ((m-mp)*ib*diag(v[li, mi])  )
+
+                            # phi^3_{l,m}: factors of terms with  w_{lp,mp}:
+                            G[ rInd+2*N : rInd+3*N , cInd+2*N : cInd+3*N ] += \
+                                    (  lp*ia* diag(u[li, mi])  + v[li,mi].reshape((N,1)) *D + m*ib*diag(w[li,mi])  )
+                            # phi^3_{l,m}: factors of terms with  v_{lp,mp}:
+                            G[ rInd+2*N : rInd+3*N , cInd+1*N : cInd+2*N ] += (   diag(wy[li, mi]) )
+                            # phi^3_{l,m}: factors of terms with  u_{lp,mp}:
+                            G[ rInd+2*N : rInd+3*N , cInd+0*N : cInd+1*N ] += (   (l-lp)*ia*diag(w[li, mi])  )
+
+                        # Now, the terms arising due to wall effects
+                        # The interactions in l are unaffected since Tz only have e^iqb
+
+                        for q in range(-q0,q0+1):
+
+                            if (-M <= (m-mp+q) <= M):
+                                mi = m-mp+q+M # Array index for spanwise wavenumber m-mp
+                                # phi^1_{l,m}: factors of terms with u_{lp,mp}
+                                G[ rInd+0*N : rInd+1*N , cInd+0*N : cInd+1*N ] += Tz[q0-q]* w[li,mi].reshape((N,1)) * D 
+                                # phi^1_{l,m}: factors of terms with w_{lp,mp}
+                                G[ rInd+0*N : rInd+1*N , cInd+2*N : cInd+3*N ] += Tz[q0-q]* diag(uy[li,mi]) 
+
+                                # phi^2_{l,m}: factors of terms with v_{lp,mp}
+                                G[ rInd+1*N : rInd+2*N , cInd+1*N : cInd+2*N ] += Tz[q0-q]* w[li,mi].reshape((N,1)) * D 
+                                # phi^2_{l,m}: factors of terms with w_{lp,mp}
+                                G[ rInd+1*N : rInd+2*N , cInd+2*N : cInd+3*N ] += Tz[q0-q]* diag(vy[li,mi]) 
+
+                                # phi^3_{l,m}: factors of terms with w_{lp,mp}
+                                G[ rInd+2*N : rInd+3*N , cInd+2*N : cInd+3*N ] += Tz[q0-q]* w[li,mi].reshape((N,1)) * D \
+                                        +Tz[q0-q]* diag(wy[li,mi]) 
 
 
-    return G 
+    return  
 
 
 
@@ -299,47 +413,34 @@ def residual(vf=None, pf=None, Lmat=None, G=None):
     return F 
 
 
-def makeSystem(flowDict=None,vf=None, pf=None, F=None, J=None, Lmat=None, G=None, resNorm=False):
+def makeSystem(vf=None,pf=None, complexType=np.complex):
     """
     Create functions for residual and Jacobian matrices, Boundary conditions and symmetries are imposed here. 
     The output functions
     Inputs:
         vf : velocity flowField (pressure field isn't needed)
-        flowDict: Needed if vf is not supplied, assigns linear/quadratic velocity field for Couette/Poiseuille flow
-        F: (residual) 1-d np.ndarray
-        J: (Jacobian) 2-d np.ndarray
-        Lmat: 2-d np.ndarray for the linear terms (including divergence) without BCs included
+        resNorm: If True, return residual norm
     
-    If residual and jacobian are supplied, the BCs and symmetries are added straight away.
-    If these are not supplied, they are computed before BCs are added
-        If Lmat is supplied, it is used, otherwise, it is computed.
         
     Outputs:
         residualBC: 1-d array
         jacobianBC: 2-d array"""
     # Creating residual array and jacobian matrix if they are not supplied
     
-    if vf is None: 
-        vf = dict2ff(flowDict)
-    else:
-        flowDict = vf.flowDict
 
     N = vf.N; N4 = 4*N
     L = vf.nx//2; M = vf.nz//2
-    nx = vf.nx; nz=vf.nz
+    L1 = L+1; nz=vf.nz
+    if pf is None:
+        pf = vf.getScalar().zero()
         
-    if (F is None) or (J is None):
-        if Lmat is None: Lmat = linr(flowDict)
-        if G is None: 
-            G = jcbn(vf)
-            
-        J = Lmat+ G
-        if F is None:
-            F = residual(vf=vf, pf=pf, Lmat=Lmat, G=G)
+    J = linr(vf.flowDict, complexType=complexType)
+    jcbn(vf, Lmat=J)
+    F = vf.residuals(pField=pf).appendField(vf.div())[0,:L1].flatten()
     
     # Some simple checks
     assert (F.ndim == 1) and (J.ndim == 2)
-    assert (J.shape[0] == vf.nx*vf.nz*N4) and (F.size == vf.nx*vf.nz*N4)
+    assert (J.shape[0] == L1*vf.nz*N4) and (F.size == L1*vf.nz*N4)
     
     
     # Imposing boundary conditions
@@ -350,52 +451,104 @@ def makeSystem(flowDict=None,vf=None, pf=None, F=None, J=None, Lmat=None, G=None
     #       of the governing equations at the walls
     # Removing wall-equations if rect is False:
     # I don't have to remove wall-equations for divergence
-    BCrows = N4*np.arange(vf.nx*vf.nz).reshape((vf.nx*vf.nz,1)) + np.array([0,N-1,N,2*N-1,2*N,3*N-1]).reshape((1,6))
+    BCrows = N4*np.arange(L1*vf.nz).reshape((L1*vf.nz,1)) + np.array([0,N-1,N,2*N-1,2*N,3*N-1]).reshape((1,6))
     BCrows = BCrows.flatten()
-    
-    residualBC = np.delete(F, BCrows)
-    jacobianBC = np.delete(J, BCrows, axis=0)
 
-        
-    # Now, just append the rows for BCs to jacobian, and zeros to residual
-    # Number of rows to add is nx*nz*6
-    residualBC = np.append(residualBC, np.zeros(6*nx*nz, dtype=np.complex))
-    jacobianBC = np.append(jacobianBC, np.zeros((6*nx*nz, jacobianBC.shape[1]), dtype=np.complex), axis=0)
-    # The appendage to jacobianBC doesn't actually give an equation since all coefficients are zero
-    #        Replacing some zeros with ones to get Dirichlet BCs:
-    #        The column numbers where the zeros must be replaced are the same as the rows we replaced
-    #            for rect=False
-    jacobianBC[range(-6*nx*nz,0),BCrows] = 1.
+    residualBC = F
+    jacobianBC = J
     
-    # Additionally, I'll also add a 0 BC on the zeroth pressure mode, but only if rect is True
+    jacobianBC[BCrows,:] = 0.
+    jacobianBC[BCrows,BCrows] = 1.
+    # Equations on boundary nodes now read 1*u_{lm} = .. , 1*v_{lm} = .., 1*w_{lm} = ..
+    # The RHS for the equations is set in residualBC below
+
+    # The BC on most Fourier modes is zero, so setting them all to zero first:
+    residualBC[BCrows] = 0.
+     
+    #Accounting for driving forces for Couette/Poiseuille flows:
+    residualBC = residualBC.reshape((vf.nx//2+1, vf.nz, 4, N))
+    if vf.flowDict['isPois']==1:
+        # Poiseuille flow, mean pressure gradient must be included in the residual 
+        residualBC[-1, vf.nz//2, 0, 1:-1] += -2./vf.flowDict['Re']
     
-    if not resNorm:
-        return jacobianBC, residualBC
+    residualBC = residualBC.flatten()
+
+    return jacobianBC, residualBC
+
+def lineSearch(normFun,x0,dx,arr=None):
+    if arr is None:
+        arr = np.arange(-1.5,1.6,0.1)
     else:
-        F = F.reshape((nx,nz,4,N))
-        F[:,:,:3,[0,-1]] = 0.
-        fnorm = chebnorm(F.flatten(),N)
+        arr = np.array(arr).flatten()
 
-        return jacobianBC, residualBC, fnorm
+    normArr = np.ones(arr.size)
+    for k in range(arr.size):
+        q = arr[k]
+        normArr[k] = normFun(x0+q*dx)
 
-def iterate(flowDict=None,vf=None, pf=None,iterMax= 6, tol=5.0e-14,rcond=1.0e-14):
-    if vf is None: 
-        vf = dict2ff(flowDict)
-    if pf is None: pf = flowFieldWavy(flowDict=updateDict(vf.flowDict,{'nd':1}))
-    Lmat = linr(vf.flowDict)
+    kMin = np.argmin(normArr)
+    normMin = normArr[kMin]
+    qMin = arr[kMin]
+
+    print("Exiting line search. Minimal norm is obtained for q in q*dx of %.2g, producing norm of %.3g"%(qMin, normMin))
+    return x0+qMin*dx
+
+
+
+def iterate(vf=None, pf=None,iterMax= 6, tol=5.0e-10,rcond=1.0e-12,complexType=np.complex):
+    if pf is None: pf = vf.getScalar().zero()
+
     fnormArr=[]
     flg = 0
+    resnorm0 = vf.residuals(pField=pf).appendField(vf.div()).norm()
+    if resnorm0 <= tol:
+        print("Initial flowfield has zero residual norm (%.3g). Returning..."%(resnorm0))
+        return vf,pf,np.array([resnorm0]),flg
+    else:
+        print("Initial residual norm is %.3g"%(resnorm0))
+
+    resnormFun = lambda x: x.slice(nd=[0,1,2]).residuals(x.slice(nd=3)).appendField(x.slice(nd=[0,1,2]).div()).norm()
     print('Starting iterations...............')
     for n in range(iterMax):
-        print('iter:',n)
+        print('iter:',n+1)
         vf0 = vf.copy() # Just in case the iterations fail
         pf0 = pf.copy() 
-        J, F, fnorm = makeSystem(vf=vf, pf=pf, Lmat=Lmat, resNorm=True)
-        print('fnorm:',fnorm)
+
+        # Ensure BCs on vf:
+        vf[:,:,:,:,[0,-1]] = 0.
+        if vf.flowDict['isPois'] == 0:
+            vf[0,vf.nx//2, vf.nz//2, 0, 0] = 1.
+            vf[0,vf.nx//2, vf.nz//2, 0,-1] = -1.
+
+
+        J, F = makeSystem(vf=vf, pf=pf,complexType=complexType)
+                
+        sys.stdout.flush()
+        
+        dx, linNorm, jRank,sVals = np.linalg.lstsq(J,-F,rcond=rcond)
+        linNorm = np.linalg.norm(np.dot(J,dx) + F)
+        print("Jacobian inversion success with residual norm ", linNorm)
+        if linNorm > linTol:
+            print('Least squares problem returned residual norm:',linNorm,' which is greater than tolerance:',linTol)
+            
+       
+       
+        x = vf.appendField(pf)
+        dxff = x.zero()
+        dxff[0,:x.nx//2+1] = dx.reshape((x.nx//2+1,x.nz,4,x.N))
+        dxff[0,x.nx//2+1:] = np.conj(dxff[0, x.nx//2-1::-1, ::-1])
+        x = lineSearch(resnormFun, x, dxff)
+        vf = x.slice(nd=[0,1,2])
+        pf = x.getScalar(nd=3)
+
+        fnorm = vf.residuals(pField=pf).appendField(vf.div()).norm()
+        print('Residual norm after %d th iteration is %.3g'%(n+1,fnorm))
+        sys.stdout.flush()
+        
         fnormArr.append(fnorm)
         if fnorm <= tol:
             flg = 0
-            print('Converged in ',n,' iterations. Returning....................................')
+            print('Converged in ',n+1,' iterations. Returning....................................')
             return vf, pf, np.array(fnormArr), flg
         
         if n>0:
@@ -404,21 +557,6 @@ def iterate(flowDict=None,vf=None, pf=None,iterMax= 6, tol=5.0e-14,rcond=1.0e-14
                 print('Residual norm is increasing:',fnormArr)
                 #print('Returning with initial velocity and pressure fields')
                 #return vf0, pf0, np.array(fnormArr),flg
-                
-        
-        dx, linNorm, jRank,sVals = np.linalg.lstsq(J,-F,rcond=rcond)
-        linNorm = np.linalg.norm(np.dot(J,dx) + F)
-        print('Number of variables, Rank of JacobianBC matrix:', J.shape[1], jRank)
-        print('len(sVals:',sVals.size, ' Last 3 singular values:',sVals[-3:])
-        print("Inversion success with residual norm ", linNorm)
-        if linNorm > linTol:
-            print('Least squares problem returned residual norm:',linNorm,' which is greater than tolerance:',linTol)
-            
-        
-        x = vf.appendField(pf)
-        x.view1d()[:] += dx
-        vf = x.slice(nd=[0,1,2])
-        pf = x.getScalar(nd=3)
         
         print('*********************************************************')
     else:
@@ -580,26 +718,44 @@ def linrInv(flowDict):
     
 
 
-def testExactRibletModule(L=3,M=5,N=20,eps=0.025):
-    vf = h52ff('eq1.h5')
-    pf = h52ff('eq1_pressure.h5',pres=True)
+def testExactRibletModule(L=4,M=7,N=35,epsArr=np.array([0.,0.05,0.02,0.03]),complexType=np.complex128):
+    vf = h52ff('testFields/eq1.h5')
+    pf = h52ff('testFields/pres_eq1.h5',pres=True)
     vf = vf.slice(L=L,M=M,N=N); pf = pf.slice(L=L,M=M,N=N)
-    Lmat = linr(vf.flowDict)
-    G = jcbn(vf)
-    x = vf.appendField(pf)
-    linTerm = np.dot(Lmat, x.flatten())
+    vf.flowDict.update({'epsArr':epsArr}); pf.flowDict.update({'epsArr':epsArr})
     
-    linTermClass = -1./vf.flowDict['Re']*vf.laplacian() + pf.grad()
-    linTermClass = linTermClass.appendField(vf.div())
+    Lmat = linr(vf.flowDict,complexType=complexType)
+    x = vf.appendField(pf)
+    
+    linTerm = np.dot(Lmat, x[0,:x.nx//2+1].flatten())
 
-    NLterm = 0.5*np.dot(G, x.flatten())
+    nex = 5
 
-    NLtermClassFine = vf.slice(L=vf.nx//2+3,M=vf.nz//2+3).convNL()
+    vf1 = vf.slice(L=vf.nx//2+nex, M = vf.nz//2+nex)
+    pf1 = pf.slice(L=vf.nx//2+nex, M = vf.nz//2+nex)
+    
+    linTermClass = -1./vf.flowDict['Re']*vf1.laplacian() + pf1.grad()
+    linTermClass = linTermClass.appendField(vf1.div()).slice(L=vf.nx//2,M=vf.nz//2)
+
+    Lmat[:] = 0.
+    jcbn(vf,Lmat=Lmat)
+
+
+    NLterm = 0.5*np.dot(Lmat, x[0,:x.nx//2+1].flatten())
+
+    NLtermClassFine = vf1.convNL()
     NLtermClass = NLtermClassFine.slice(L=vf.nx//2, M=vf.nz//2).appendField(pf.zero())
 
-    linTestResult =  np.linalg.norm(linTerm - linTermClass.flatten()) <= tol
-    NLtestResult = np.linalg.norm(NLterm - NLtermClass.flatten()) <= tol
-    assert linTestResult and NLtestResult
+    linTestResult =  np.linalg.norm(linTerm - linTermClass[0,:x.nx//2+1].flatten()) <= tol
+    NLtestResult = np.linalg.norm(NLterm - NLtermClass[0,:x.nx//2+1].flatten()) <= tol
+    if not linTestResult :
+        print('Residual norm for linear is:',np.linalg.norm(linTerm - linTermClass[0,:x.nx//2+1].flatten()))
+    if not  NLtestResult:
+        print('Residual norm for non-linear is:',np.linalg.norm(NLterm - NLtermClass[0,:x.nx//2+1].flatten()))
+
+    if linTestResult and NLtestResult:
+        print("Success for both tests!")
+    
     return linTestResult, NLtestResult
 
 
