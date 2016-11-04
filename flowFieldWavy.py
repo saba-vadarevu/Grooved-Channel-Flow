@@ -2,6 +2,7 @@ from flowField import *
 from myUtils import *
 import numpy as np
 import scipy.io as sio
+import scipy.integrate as spint
 import os
 import h5py
 
@@ -788,6 +789,99 @@ class flowFieldRiblet(flowFieldWavy):
         print("saved field to ",fName)
         outFile.close()
         return
+
+    def powerInput(self, tol= 1.0e-07):
+        """ Power input to Couette flow, defined as
+        I = 1/2/Area * \int_{wall-area} ( du_dy(Y=1) + du_dy(Y=-1) )  d(Area)
+            For grooved Couette flow, the derivatives aren't with respect to y, 
+                but with respect to the local wall-normal.
+            It might be possible to derive an explicit expression for the integral,
+                but I'm too lazy to work through it, and it's really not worth the risk of bugs
+            I'm going brute-force with the integration.
+            Anyway, the dissipation must equal powerInput, so this function exists only to verify this.
+        """
+        # Derivative of u along the local wall-normal is computed as follows:
+        # First, calculate the gradient:
+        uGrad = self.getScalar().grad()
+
+        # Only the l=0 modes are relevant, because all other streamwise modes integrate to zero
+        # I don't need all the extra machinery of flowFieldRiblet at this point
+        #   and I only need the gradients at the wall
+        uGrad0 = uGrad.slice(L=0).copyArray()
+        uGrad0Top = uGrad0[0,0,:,:,0].reshape((self.nz, 1, 3))
+        uGrad0Bottom = uGrad0[0,0,:,:,-1].reshape((self.nz,1,3))
+        # The first semicolon is for spanwise modes, and the second for the three components- X,Y,Z
+        
+        # For any direction of the local wall-normal, the directional derivative along the normal
+        #   is simply the dot-product of the gradient with the local normal. 
+        # However, the gradient has to have a physical value here, not spectral coefficients.
+        #   Defining a function to obtain the physical value of the gradient field
+        M = self.nz//2; mArr = np.arange(-M,M+1).reshape((self.nz, 1,1)); b = self.flowDict['beta']
+        def _gradPhysical(zArr,specCoeffs):
+            specCoeffs = specCoeffs.reshape((self.nz, 1, 3))
+            # Just keeping things safe
+
+            # Should work with float or array inputs
+            zArr = np.array([zArr]).flatten()
+            zArr = zArr.reshape((1,zArr.size,1))
+
+            gradPhys = np.zeros((zArr.size, 3))
+
+            gradPhys[:] = np.real(np.sum(  np.exp(1.j*mArr*b*zArr) * specCoeffs, axis=0 ))
+
+
+            return gradPhys
+
+        # Now, defining a function to define the direction of the local-normal
+        # Some math first
+        # If the wall is given by the eqn. y_w = -1 + T(z) = -1 + \sum_q  A_q e^(q*b*z),
+        #   then the local-normal is given by the gradient of the scalar 
+        #               S(x,y,z) = y + 1 - T(z) = 0
+        # S_x = 0;  S_y = 1;    S_z = -T_z(z),
+        #   where T_z(z) can be calculated from the factors given by the function Tderivatives
+        # Note that the vector [S_x, S_y, S_z] is not a unit vector. It must be normalized
+        #       before calculating the directional derivative along the local unit-normal
+
+        # First, T_z(z):
+        TzSpec = Tderivatives(self.flowDict)[0]     # Gives the spectral coefficients of T_z
+        q0 = TzSpec.size//2
+        qArr = np.arange(-q0, q0+ 1 ).reshape((1,2*q0+1)) # Surface modes
+        def _TzPhysical(zArr):
+            zArr = np.array([zArr]).flatten()
+            zArr = zArr.reshape((zArr.size,1))
+
+            TzPhys = np.real(np.sum( np.exp(1.j*qArr*b*zArr) * TzSpec, axis=1 ))
+            
+            return TzPhys
+
+        # Now I can put together the two functions above to get the local unit-normal
+        def _unitNormal(zArr):
+            zArr = np.array([zArr]).flatten()
+
+            normalsArr = np.zeros((zArr.size, 3))
+            normalsArr[:,0] = 0.
+            normalsArr[:,1] = 1.
+            normalsArr[:,2] = -1.* _TzPhysical(zArr)
+
+            normalsArr *= normalsArr/np.sqrt(1.+normalsArr[:,2:]**2)
+            
+
+            return normalsArr
+
+        # Finally, I can multiply the gradient vectors with local unit-normals 
+        dudnTop     = lambda zArr: np.sum( _gradPhysical(zArr,uGrad0Top   ) * _unitNormal(zArr), axis=1)
+        dudnBottom  = lambda zArr: np.sum( _gradPhysical(zArr,uGrad0Bottom) * _unitNormal(zArr), axis=1)
+
+        # And integrate using numpy's trapz 
+        zArr = np.arange(0., (1+1.0e-07)* 2.*np.pi/b, 2.*np.pi/b*(1.0e-04))
+        dudnTopAvg    = np.trapz(dudnTop(zArr)   , zArr)
+        dudnBottomAvg = np.trapz(dudnBottom(zArr), zArr)
+
+
+        # The average power input is:
+        pInput = 0.5 * (b/2./np.pi) * (dudnTopAvg + dudnBottomAvg)
+
+        return pInput
 
 
 

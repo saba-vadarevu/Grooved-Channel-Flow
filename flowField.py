@@ -1,5 +1,4 @@
-""" 
-#####################################################
+""" #####################################################
 Author : Sabarish Vadarevu
 Affiliation: Aerodynamics and Flight Mechanics group, University of Southampton.
 
@@ -394,8 +393,7 @@ class flowField(np.ndarray):
         a = self.flowDict['alpha']
         tol = 1.0e-9
         if a == 0.:
-            integralX = self.view4d().copy()
-            integralX[:] = 0.+0.j
+            integralX = self.zero()
             if self.norm() >= tol:
                 warn("Integral in x cannot be represented by Fourier series for alpha = 0 with non-zero Fourier coeffs, account for c_0m(y)*x separately")
             return integralX
@@ -435,8 +433,7 @@ class flowField(np.ndarray):
         b = self.flowDict['beta']
         tol = 1.0e-9
         if b == 0.:
-            integralZ = self.view4d().copy()
-            integralZ[:] = 0.+0.j
+            integralZ = self.zero()
             if self.norm() >= tol:
                 warn("Integral in z cannot be represented by Fourier series for alpha = 0 with non-zero Fourier coeffs, account for c_0m(y)*x separately")
             return integralZ
@@ -559,6 +556,30 @@ class flowField(np.ndarray):
     def norm(self):
         """Integrates v[nd=j]*v[nd=j].conjugate() along x_j, sums across j=1,..,self.nd , and takes its square-root"""
         return np.sqrt(np.abs(self.dot(self)))
+
+    def dissipation(self):
+        """ Bulk dissipation rate, D = 1/Vol. * \int_{vol} || curl(v) ||^2  d vol
+        The volume integral (per unit volume) of |curl|**2 is simply the square of the norm of the curl
+        """
+        return (self.curl().norm())**2
+
+    def energy(self):
+        """ Kinetic energy density, E =  1/Vol. * \int_{vol} 0.5 * || v ||^2  d vol
+        The volume integral (per unit volume) of |v|**2 is simply the square of the norm of the velocity 
+        """
+        return 0.5*(self.slice(nd=[0,1,2]).norm())**2
+
+    def powerInput(self,tol=1.0e-07):
+
+        if self.flowDict['isPois'] != 0:
+            warn("Power-input only makes sense for Couette flow. For Poiseuille flow, \
+                use mean-pressure gradient instead.")
+        uy = self.getScalar().ddy()
+        uy00top = uy[0,self.nx//2, self.nz//2, 0,  0]
+        uy00bot = uy[0,self.nx//2, self.nz//2, 0, -1]
+        # Energy input to flow is 1 + 1/2/Area * \int_{wall-area} ( u_y(Y=1) + u_y(y=-1) ) d Area
+        #  Integral over periodic box is non-zero only for the (0,0) Fourier mode
+        return  (0.5 * (uy00top + uy00bot) ) 
    
 
     def weighted(self):
@@ -696,89 +717,7 @@ class flowField(np.ndarray):
 
         return residual     
     
-    def solvePressure(self, pField=None, residuals=None, divFree=False):
-        """ Solves for pressure, given a 3C velocity field.
-            RETURNS TWO FLOWFIELD INSTANCES: The first one is the corrected pField, the second is the residual when the corrected pressure is used
-        If pField is supplied, only corrections about this field need to be calculated. The returned field is pField + corrections computed.
-        If residuals is supplied (should be evaluations of the momentum equations using 'self' and 'pField'), 
-            the NSE need not be evaluated again, and solving for the pressure field is quite fast
-        If residuals is not supplied, the momentum equations are evaluated in the function, and that takes a while
-        NOTE: The method does not solve a Poisson equation. 
-        Instead, the following approach is used:
-            Wall-normal momentum gives wall-normal derivative of each pressure Fourier mode
-                Integrating the wall-normal gradient gives the pressure up to a constant 
-                In this step, the constant is set such that the pressure at y=1 is zero for each mode
-            The residuals of streamwise momentum equation and spanwise momentum equation are averaged to get the actual constant (minimizes the residuals)"""
-        
-        assert self.nd == 3, 'The flowField instance supplied must be a 3D velocity field'
-        tempDict = self.flowDict.copy()
-        tempDict['nd'] = 1
-        pCorrection = flowField(flowDict=tempDict)
-        
-        if pField is None:
-            pField = flowField(flowDict=tempDict)  # Initializes a zero field
-        else:
-            assert pField.size == self.size/3, 'pField must be of the same size of each component of the velocity field'
-        
-        # (u.div(v) - 1/Re* laplacian(v) ) + dp_1/dy + dp_Corr/dy= 0,     where p_1 = pField (input argument),p_Corr is the correction
-        # p_Corr = - \int residual dy, where residual is the sum of first three terms on LHS
-        
-        pCorrection = None
-        if residuals is None:
-            residuals = self.residuals(pField=pField, divFree=divFree)[0]
-        else: 
-            assert (residuals.nd == 3) and (residuals.size == self.size), 'residuals must be a 3D flowField object of the same size as self'
-            
-        pCorrection = -(residuals.getScalar(nd=1)).intY()
-        # pCorrection is now determined upto a constant. Next, find the constant that minimizes residual for streamwise, spanwise
-        
-        residuals[:,:,:,1:2] += pCorrection.ddy()
-        residuals[:,:,:,0:1] += pCorrection.ddx()
-        residuals[:,:,:,2:3] += pCorrection.ddz()
-        #assert residuals.getScalar(nd=1).norm() < 1.0e-6, 'Wall-normal residual has not gone below 1.0e-6 even after correcting dpdy. Weird'
-        
-        # (....) + ilap = 0
-        # (....) + imbp = 0             a is \alpha, b is \beta, l and m identify Fourier mode
-        # Constant that minimizes streamwise residual norm is   \int (-(residual_x)/ila) dy
-        # Creating arrays to hold the constants
-        constX = np.zeros((self.nt,self.nx,self.nz),dtype=np.complex) 
-        constZ = constX.copy()
-        
-        w = clencurt(self.N).reshape((1,1,1,1,self.N))
-        L = self.flowDict['L']; M = self.flowDict['M']
-        a = self.flowDict['alpha']; b = self.flowDict['beta']
-        lArr = np.arange(-L, L+1).reshape((1,self.nx,1,1)) 
-        lArr[0,L] = 1.   # Avoiding zeros, will account for this later (about 10 lines below)
-        mArr = np.arange( -M , M+1 ).reshape((1,1,self.nz,1)) 
-        mArr[0,0,M] = 1.   # Avoiding zeros
-        
-        # Corrections only make sense when la != 0 and mb != 0. So keep entries of constX, constZ as zero when la= 0 or mb=0
-        if a != 0.:
-            constX[:] = -np.sum( w* (residuals.copyArray()[:,:,:,0]/1.j/lArr/a ), axis=-1)
-        if b != 0.:
-            constZ[:] = -np.sum( w* (residuals.copyArray()[:,:,:,2]/1.j/mArr/b ), axis=-1)
-        
-        constX[:,L ]  = 0.
-        constZ[:,:,M] = 0.
-        
-        const = None
-        if a == 0: const = constZ
-        elif b==0: const = constX
-        else: 
-            const = (constX + constZ)/2.
-            const[:,L] += constZ[:,L]/2.; const[:,:,M] += constX[:,:,M] 
-        
-        const = const.reshape((self.nt,self.nx,self.nz,1))
-        const[const<pCorrTol] = 0.
-        
-        residuals[:,:,:,0] += 1.j*lArr*a*const
-        residuals[:,:,:,2] += 1.j*mArr*b*const
-        pCorrection[:,:,:,0] += const
-        
-        return (pField.view4d()+pCorrection), residuals
     
-###########################################################################################################
-# 14 March 6 30 PM
     def direcDeriv(self, tLoc=0., xLoc=0., zLoc=0., yLoc=None, nd=0, direc=(1.,0.,0.)):
         """Returns the directional derivative AT A POINT of a single variable
         Arguments: tLoc, xLoc, zLoc, yLoc (pretty obvious what they are), can be floats, arrays, or lists
@@ -1105,3 +1044,12 @@ def _convolve(ff1,ff2):
     
     return conv      
 
+
+def makeVector(*args):
+    ff0 = args[0]
+    
+    if len(args)>1:
+        for ff in args[1:]:
+            ff0 = ff0.appendField(ff)
+    return ff0
+        

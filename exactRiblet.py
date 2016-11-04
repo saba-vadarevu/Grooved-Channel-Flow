@@ -16,17 +16,16 @@ def arr2ff(arr=None,flowDict=None):
     ff = flowFieldRiblet(flowDict=tempDict,arr=arr)
     return ff
 
-def setSymms(vfTemp):
+def setSymms(xTemp):
     """Set velocities at walls to zero, and ensure that the field is real valued"""
-    vf = vfTemp.copy()
-    assert vf.nd == 3
-    vf.view4d()[:,:,:,:,[0,-1]] = 0.
-    if vf.flowDict['isPois']== 0:
-        vf.view4d()[0,vf.nx//2, vf.nz//2, 0,[0,-1]] = np.array([1.,-1.])
+    x = xTemp.copy()
+    x.view4d()[:,:,:,:3,[0,-1]] = 0.
+    if x.flowDict['isPois']== 0:
+        x.view4d()[0,x.nx//2, x.nz//2, 0,[0,-1]] = np.array([1.,-1.])
     
-    vf[0,:,:vf.nz//2] = 0.5*(vf[0,:,:vf.nz//2]+ vf[0,:,:vf.nz//2:-1].conj())
-    vf[0,:,:vf.nz//2:-1] = vf[0,:,:vf.nz//2].conj()
-    return vf
+    #vf[0,:,:vf.nz//2] = 0.5*(vf[0,:,:vf.nz//2]+ vf[0,:,:vf.nz//2:-1].conj())
+    #vf[0,:,:vf.nz//2:-1] = vf[0,:,:vf.nz//2].conj()
+    return x 
 
 def dict2ff(flowDict):
     """ Returns a velocity flowField with linear/quadratic profile depending on 'isPois'"""
@@ -380,37 +379,8 @@ def jcbn(vf,Lmat=None):
 
     return  
 
-
-
-def residual(vf=None, pf=None, Lmat=None, G=None):
-    """Compute residual: res = (Lmat+0.5*G)x - f"""
-    flowDict = vf.flowDict
-    N = vf.N 
-    if Lmat is None: Lmat = linr(flowDict)
-    if G is None: G = jcbn(vf)
-    if pf is None: 
-        warn('pressure field not supplied, assigning zero pressure for computing residual')                
-        x = vf.appendField(vf.getScalar().zero())
-    else: x = vf.appendField(pf)
-    xArr = x.flatten()
-
-    BCrows = 4*N*np.arange(vf.nx*vf.nz).reshape((vf.nx*vf.nz, 1)) + np.array([0,N-1,N,2*N-1,2*N,3*N-1]).reshape((1,6))
-    BCrows = BCrows.flatten()
-    G[BCrows,:] = 0.
-    Lmat[BCrows,:] =0.
-    Lmat[BCrows,BCrows] = 1.
-    
-    F = np.dot(Lmat+0.5*G, xArr)
-    # If flow is not Couette, then mean pressure gradient needs to be added
-    F = F.reshape((vf.nx,vf.nz,4,N))
-    if flowDict['isPois'] == 1:
-        F[vf.nx//2,vf.nz//2,0,1:-1] += -2./flowDict['Re']
-    elif flowDict['isPois'] == 0:
-        F[vf.nx//2, vf.nz//2,0, [0,-1]] -= np.array([1.,-1.])
-        
-    F = F.flatten()
-    
-    return F 
+def _residual(x):
+    return (x.slice(nd=[0,1,2]).residuals(pField=x.getScalar(nd=3)).appendField( x.slice(nd=[0,1,2]).div() ) )
 
 
 def makeSystem(vf=None,pf=None, complexType=np.complex):
@@ -425,9 +395,7 @@ def makeSystem(vf=None,pf=None, complexType=np.complex):
     Outputs:
         residualBC: 1-d array
         jacobianBC: 2-d array"""
-    # Creating residual array and jacobian matrix if they are not supplied
     
-
     N = vf.N; N4 = 4*N
     L = vf.nx//2; M = vf.nz//2
     L1 = L+1; nz=vf.nz
@@ -436,7 +404,7 @@ def makeSystem(vf=None,pf=None, complexType=np.complex):
         
     J = linr(vf.flowDict, complexType=complexType)
     jcbn(vf, Lmat=J)
-    F = vf.residuals(pField=pf).appendField(vf.div())[0,:L1].flatten()
+    F = (vf.residuals(pField=pf).appendField( vf.div() ) )[0,:L1].flatten()
     
     # Some simple checks
     assert (F.ndim == 1) and (J.ndim == 2)
@@ -454,7 +422,6 @@ def makeSystem(vf=None,pf=None, complexType=np.complex):
     BCrows = N4*np.arange(L1*vf.nz).reshape((L1*vf.nz,1)) + np.array([0,N-1,N,2*N-1,2*N,3*N-1]).reshape((1,6))
     BCrows = BCrows.flatten()
 
-    residualBC = F
     jacobianBC = J
     
     jacobianBC[BCrows,:] = 0.
@@ -462,22 +429,13 @@ def makeSystem(vf=None,pf=None, complexType=np.complex):
     # Equations on boundary nodes now read 1*u_{lm} = .. , 1*v_{lm} = .., 1*w_{lm} = ..
     # The RHS for the equations is set in residualBC below
 
-    # The BC on most Fourier modes is zero, so setting them all to zero first:
-    residualBC[BCrows] = 0.
-     
-    #Accounting for driving forces for Couette/Poiseuille flows:
-    residualBC = residualBC.reshape((vf.nx//2+1, vf.nz, 4, N))
-    if vf.flowDict['isPois']==1:
-        # Poiseuille flow, mean pressure gradient must be included in the residual 
-        residualBC[-1, vf.nz//2, 0, 1:-1] += -2./vf.flowDict['Re']
-    
-    residualBC = residualBC.flatten()
+    return jacobianBC, F 
 
-    return jacobianBC, residualBC
 
 def lineSearch(normFun,x0,dx,arr=None):
+    print("Beginning line search.... Initial residual norm is ",normFun(x0))
     if arr is None:
-        arr = np.arange(-1.5,1.6,0.1)
+        arr = np.arange(-0.5,2.1,0.1)
     else:
         arr = np.array(arr).flatten()
 
@@ -490,35 +448,61 @@ def lineSearch(normFun,x0,dx,arr=None):
     normMin = normArr[kMin]
     qMin = arr[kMin]
 
-    print("Exiting line search. Minimal norm is obtained for q in q*dx of %.2g, producing norm of %.3g"%(qMin, normMin))
+    if arr[0] < arr[kMin] < arr[-1]:
+        arrNew = np.arange( arr[kMin-1], arr[kMin+1], (arr[kMin+1] - arr[kMin-1])/20.)
+        normArrNew = np.ones(arrNew.size)
+        for k in range(arrNew.size):
+            q = arrNew[k]
+            normArrNew[k] = normFun(x0+q*dx)
+
+        kMinNew = np.argmin(normArrNew)
+        normMinNew = normArrNew[kMinNew]
+        qMinNew = arrNew[kMinNew]
+
+        round2 = True
+    else:
+        round2 = False
+
+    print("Line search.... normArr is",normArr)
+    print("Minimal norm is obtained for q in q*dx of %.2g, producing norm of %.3g"%(qMin, normMin))
+    if round2:
+        print("Finer line search.... normArr is",normArrNew)
+        print("Minimal norm is obtained for q in q*dx of %.2g, producing norm of %.3g"%(qMinNew, normMinNew))
+        qMin = qMinNew
+
+    oldNorm = normFun(x0); newNorm = normFun(x0+qMin*dx)
+    if newNorm > oldNorm:
+        print("New norm (%.3g) is greater than the old norm (%.3g) for some weird reason"%(newNorm,oldNorm))
+
     return x0+qMin*dx
 
 
 
-def iterate(vf=None, pf=None,iterMax= 6, tol=5.0e-10,rcond=1.0e-12,complexType=np.complex):
+def iterate(vf=None, pf=None,iterMax= 6, tol=5.0e-10,rcond=1.0e-07,complexType=np.complex,doLineSearch=True):
     if pf is None: pf = vf.getScalar().zero()
+    resnormFun = lambda x: _residual(x).norm()
+
+    x = vf.appendField(pf)
+
+    x = setSymms(x)   # Nothing fancy here. Just setting velocities at wall to zero
+    # And ensuring field is real-valued
 
     fnormArr=[]
     flg = 0
-    resnorm0 = vf.residuals(pField=pf).appendField(vf.div()).norm()
+    resnorm0 = resnormFun(x)
     if resnorm0 <= tol:
         print("Initial flowfield has zero residual norm (%.3g). Returning..."%(resnorm0))
         return vf,pf,np.array([resnorm0]),flg
     else:
         print("Initial residual norm is %.3g"%(resnorm0))
 
-    resnormFun = lambda x: x.slice(nd=[0,1,2]).residuals(x.slice(nd=3)).appendField(x.slice(nd=[0,1,2]).div()).norm()
     print('Starting iterations...............')
     for n in range(iterMax):
         print('iter:',n+1)
-        vf0 = vf.copy() # Just in case the iterations fail
-        pf0 = pf.copy() 
 
-        # Ensure BCs on vf:
-        vf[:,:,:,:,[0,-1]] = 0.
-        if vf.flowDict['isPois'] == 0:
-            vf[0,vf.nx//2, vf.nz//2, 0, 0] = 1.
-            vf[0,vf.nx//2, vf.nz//2, 0,-1] = -1.
+
+        # Ensure BCs on vf, and field is real-valued
+        vf = x.slice(nd=[0,1,2]); pf = x.slice(nd=3)
 
 
         J, F = makeSystem(vf=vf, pf=pf,complexType=complexType)
@@ -533,16 +517,20 @@ def iterate(vf=None, pf=None,iterMax= 6, tol=5.0e-10,rcond=1.0e-12,complexType=n
             
        
        
-        x = vf.appendField(pf)
         dxff = x.zero()
         dxff[0,:x.nx//2+1] = dx.reshape((x.nx//2+1,x.nz,4,x.N))
         dxff[0,x.nx//2+1:] = np.conj(dxff[0, x.nx//2-1::-1, ::-1])
-        x = lineSearch(resnormFun, x, dxff)
-        vf = x.slice(nd=[0,1,2])
-        pf = x.getScalar(nd=3)
+        dxff[0,:,:,:3,[0,-1]] = 0.
 
-        fnorm = vf.residuals(pField=pf).appendField(vf.div()).norm()
-        print('Residual norm after %d th iteration is %.3g'%(n+1,fnorm))
+        if doLineSearch:
+            x = lineSearch(resnormFun, x, dxff)
+        else:
+            x += dxff
+        print("residual norm before setSymms:",resnormFun(x))
+        x = setSymms(x)
+
+        fnorm = resnormFun(x)
+        print('Residual norm after setSymms in %d th iteration is %.3g'%(n+1,fnorm))
         sys.stdout.flush()
         
         fnormArr.append(fnorm)
@@ -564,7 +552,7 @@ def iterate(vf=None, pf=None,iterMax= 6, tol=5.0e-10,rcond=1.0e-12,complexType=n
             print('Iterations have not converged for iterMax=',iterMax)
             print('fnormArr is ',fnormArr)
             flg = -1
-    return vf, pf, np.array(fnormArr), flg
+    return x.slice(nd=[0,1,2]), x.getScalar(nd=3), np.array(fnormArr), flg
 
 def shearStress(vf):
     """ Returns averaged shear stress at the bottom wall
