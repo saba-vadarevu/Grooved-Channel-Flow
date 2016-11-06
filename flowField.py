@@ -690,15 +690,17 @@ class flowField(np.ndarray):
         When only a velocity field is available, use 
                 >> self.solvePressure()[1] 
             to get the residuals instead."""
-        assert self.nd == 3, "Method only accepts 3C flowfields, pass pressure using the keyword argument pField"
-        tempVec = self.getScalar(nd=1).view4d()
-        residual = self.zero()
-        K = self.flowDict['K']; L = self.flowDict['L']; M = self.flowDict['M']; N = self.N
-        
-        if pField is None:
+        if self.nd ==4:
+            pField = self.getScalar(nd=3)
+        elif pField is None:
             pField = self.getScalar(); pField[:] = 0.  
         else: 
             assert (pField.nd == 1) and (pField.size == self.size//3), 'pField should be a scalar of the same size as each scalar of velocity'
+        
+        tempVec = self.getScalar(nd=1).view4d()
+        residual = self.zero()
+        K = self.flowDict['K']; L = self.flowDict['L']; M = self.flowDict['M']; N = self.N
+
         
         residual[:] = pField.grad() - (1./self.flowDict['Re'])*self.laplacian()
         if self.flowDict['isPois'] ==1:
@@ -1052,4 +1054,33 @@ def makeVector(*args):
         for ff in args[1:]:
             ff0 = ff0.appendField(ff)
     return ff0
+
+def translateField(x,dz=0.,dx=0.):
+    """ See shiftPhase(x,phiZ=0.,phiX=0.)"""
+    a = x.flowDict['alpha']; b = x.flowDict['beta']
+    phiX = a*dx
+    phiZ = b*dz
+    return shiftPhase(x,phiX=phiX, phiZ=phiZ)
+
+def shiftPhase(x0,phiZ=0., phiX=0.):
+    """ Translates/phase-shifts flowfield
+    Inputs: 
+        x0 : flowField instance
+        phiZ : (default: 0.) phase-shift in z
+        phiX : (default: 0.) phase-shift in x
+    Outputs: 
+        x : Phase-shifted flowField instance """
+    x = x0.copy().view4d()
+    if phiZ != 0.:
+        M = x.nz//2
+        mArr = np.arange(-M,M+1).reshape((1,1,x.nz,1,1))
+        phaseArr = np.exp(-1.j*mArr*phiZ)
+        x = phaseArr*x
+    if phiX != 0.:
+        L = x0.nx//2
+        lArr = np.arange(-L,L+1).reshape((1,x0.nx,1,1,1))
+        phaseArr = np.exp(-1.j*lArr*phiX)
+        x = phaseArr*x
+    return x
+    
         
