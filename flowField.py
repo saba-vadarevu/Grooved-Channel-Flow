@@ -696,20 +696,22 @@ class flowField(np.ndarray):
             pField = self.getScalar(); pField[:] = 0.  
         else: 
             assert (pField.nd == 1) and (pField.size == self.size//3), 'pField should be a scalar of the same size as each scalar of velocity'
+
+        vf = self.slice(nd=[0,1,2])
         
         tempVec = self.getScalar(nd=1).view4d()
-        residual = self.zero()
+        residual = vf.zero()
         K = self.flowDict['K']; L = self.flowDict['L']; M = self.flowDict['M']; N = self.N
 
         
-        residual[:] = pField.grad() - (1./self.flowDict['Re'])*self.laplacian()
+        residual[:] = pField.grad() - (1./vf.flowDict['Re'])*vf.laplacian()
         if self.flowDict['isPois'] ==1:
             residual[K,L,M,0] -= 2./self.flowDict['Re']     # adding dP/dx, the mean pressure gradient
 
-        residual[:] += self.convNL(**kwargs)
+        residual[:] += vf.convNL(**kwargs)
         
         if BC:
-            residual[:,:,:,:,[0,-1]] = self[:,:,:,:,[0,-1]]     
+            residual[:,:,:,:,[0,-1]] = vf[:,:,:,:,[0,-1]]     
             # Residual at walls is given by the velocities at the walls, this serves as the BC
 
             # For Couette flow, the BCs on streamwise velocity aren't zero
@@ -1011,6 +1013,205 @@ class flowField(np.ndarray):
 
     def identity(self):
         return self
+    
+    def translateField(self,dz=0.,dx=0.):
+        """ See shiftPhase(x,phiZ=0.,phiX=0.)"""
+        a = self.flowDict['alpha']; b = self.flowDict['beta']
+        phiX = a*dx
+        phiZ = b*dz
+        return self.shiftPhase(phiX=phiX, phiZ=phiZ)
+
+    def shiftPhase(self,phiZ=0., phiX=0.):
+        """ Translates/phase-shifts flowfield
+        Inputs: 
+            self : flowField instance
+            phiZ : (default: 0.) phase-shift in z
+            phiX : (default: 0.) phase-shift in x
+        Outputs: 
+            x : Phase-shifted flowField instance """
+        x = self.copy().view4d()
+        if phiZ != 0.:
+            M = x.nz//2
+            mArr = np.arange(-M,M+1).reshape((1,1,x.nz,1,1))
+            phaseArr = np.exp(-1.j*mArr*phiZ)
+            x = phaseArr*x
+        if phiX != 0.:
+            L = x.nx//2
+            lArr = np.arange(-L,L+1).reshape((1,x.nx,1,1,1))
+            phaseArr = np.exp(-1.j*lArr*phiX)
+            x = phaseArr*x
+        return x
+
+    def reflectZ(self,nd=3, phiX=0., phiZ=0.):
+        """ Returns a reflected version of the flowField, reflected about the x-y plane z=0
+        Inputs:
+            self      : Original flowField
+            nd (=3)   : int indicating which scalar is supplied. Unimportant if self.nd is not 1
+            phiZ(=0)  : If not zero, indicates that reflection is about the plane z= (phiZ/beta)
+            phiX(=0)  : Not important for reflectZ, dummy argument
+        Outputs:
+            x         : Reflected flowField
+
+        F denotes the reflection operator for reflection about z=0
+            (Fu)(x,y,z) = u(x,y,-z)
+            (Fv)(x,y,z) = v(x,y,-z)
+            (Fw)(x,y,z) = -w(x,y,-z)
+            (Fp)(x,y,z) = p(x,y,-z)
+        Note the negative for w.
+        Fourier coefficients for Fu are (Fu)_lm = u_{l,-m}, similarly for others
+        
+        Reflection about F_{z=Z} can be written as F_{Z} = T_{0,Z} F_0 T_{0,-Z},
+            where T is the translation operator"""
+        x = self.copy().view4d()
+
+        # If reflection is not about z=0, apply T_{0,-Z} first
+        if phiZ != 0.: 
+            x = shiftPhase(x, phiZ = -phiZ)
+
+        # F_0
+        x = x[:,:,::-1]    # Assign the self_{l,-m} to x_{l,m}
+        if x.nd >=3:
+            x[:,:,:,2] = -x[:,:,:,2]
+            # Sign for w is flipped
+        elif x.nd == 1:
+            # If it's a scalar field, flip sign only for nd=2 (w)
+            if nd == 2:
+                x = -x
+
+        # And finally T_{0,Z}
+        if phiZ != 0.: 
+            x = shiftPhase(x, phiZ = phiZ)
+            
+        return x
+
+    def rotateZ(self, nd=3, phiX=0., phiZ=0.):
+        """ Returns a rotated version of the flowField, rotated about the z-axis by pi
+        Inputs:
+            self      : Original flowField
+            nd (=3)   : int indicating which scalar is supplied. Unimportant if self.nd is not 1
+            phiX(=0)  : If not zero, indicates that rotation is at the point x= (phiX/beta)
+            phiZ(=0)  : Not important for rotateZ, dummy argument
+        Outputs:
+            x         : Reflected flowField
+
+        R denotes the rotation operator
+            (Ru)(x,y,z) = -u(-x,-y,z)
+            (Rv)(x,y,z) = -v(-x,-y,z)
+            (Rw)(x,y,z) =  w(-x,-y,z)
+            (Rp)(x,y,z) =  p(-x,-y,z)
+        Fourier coefficients for Ru are (Ru)_{l,m}(y) = u_{-l,m}(-y), and so on
+        Reflection about R_{x=X} can be written as F_{X} = T_{X,0} F_0 T_{-X,0},
+            where T is the translation operator"""
+        x = self.copy().view4d()
+
+        # If rotation is not at x=0, apply T_{-X,0} first
+        if phiX != 0.: 
+            x = shiftPhase(x, phiX = -phiX)
+
+        # R_0
+        x = -x[:, ::-1, :, :, ::-1]    # Assign the -self_{-l,m}(-y) to x_{l,m}
+        if x.nd >=3:
+            x[:,:,:,2:] = -x[:,:,:,2:]
+            # Sign for w is not supposed to be flipped, but I did it earlier
+        elif x.nd == 1:
+            # If it's a scalar field, do not flip sign for nd=2 (w) or nd=3 (p)
+            if (nd == 2) or (nd==3):
+                x = -x
+
+        # And finally T_{X,0}
+        if phiX != 0.: 
+            x = shiftPhase(x, phiX = phiX)
+            
+        return x
+
+    def pointwiseInvert(self,nd=3,phiX=0., phiZ=0.):
+        """ Returns a pointwise-inverted version of the flowField, about x=phiX/alpha, z = phiZ/beta
+        Inputs:
+            self      : Original flowField
+            nd (=3)   : int indicating which scalar is supplied. Unimportant if self.nd is not 1
+            phiX(=0)  : If not zero, indicates that rotation is at the point x= (phiX/beta)
+            phiZ(=0)  : Not important for rotateZ, dummy argument
+        Outputs:
+            x         : Reflected flowField
+
+        P denotes the pointwise inversion operator (about (0,0))
+        P = F R
+            (Pu)(x,y,z) = -u(-x,-y,-z)
+            (Pv)(x,y,z) = -v(-x,-y,-z)
+            (Pw)(x,y,z) = -w(-x,-y,-z)
+            (Pp)(x,y,z) =  p(-x,-y,-z)
+        Fourier coefficients for Pu are (Pu)_{l,m}(y) = -u_{-l,-m}(-y), and so on
+        P_{X,Z} = T_{X,Z} F_0 T_{-X,-Z},
+            where T is the translation operator"""
+        x = self.copy().view4d()
+
+        # If inversion is not about the origin, apply T_{-X,-Z} first
+        if (phiX != 0.) or (phiZ != 0.): 
+            x = shiftPhase(x, phiX = -phiX, phiZ = -phiZ)
+
+        # P_0
+        x = -x[:, ::-1, ::-1, :, ::-1]    # Assign the -self_{-l,-m}(-y) to x_{l,m}
+        if x.nd ==4:
+            x[:,:,:,3] = -x[:,:,:,3]
+            # Sign for p is not supposed to be flipped, but I did it earlier
+        elif x.nd == 1:
+            # If it's a scalar field, do not flip sign for nd=3 (p)
+            if (nd == 3):
+                x = -x
+
+        # And finally T_{X,Z}
+        if (phiX != 0.) or (phiZ != 0.): 
+            x = shiftPhase(x, phiX = phiX, phiZ = phiZ)
+            
+        return x
+
+    def checkSymms(self, moreSymms=False, cellShift=2,tol=None):
+        """ By default, check symmetries sigma_1, sigma_2, sigma_3 of plane Couette flow
+                sigma_1, sigma_2, sigma_3 commented on in code
+        Additionally, I can request to check for other symmetries that are combinations of
+            rotateZ, reflectZ, pointwiseInvert, and translateField
+        Inputs:
+            self:   flowField instance
+            moreSymms (False): If True, check for additional symmetries
+            cellShift (=2)   : Check for symmetries involving shifts of n*Lx/cellShift
+            tol              : Tolerance for deciding if a symmetry holds
+        Outputs:
+            symmsDict: Dictionary with four keys, sigma1, sigma2, sigma3, others,
+                            values are boolean showing if the symmetries exist in the solution
+        """
+        # Initiate with all false
+        symmsDict = {'sigma1':False, 'sigma2':False,'sigma3':False,'others':'Maybe'}
+        # Checking for other symmetries is not ready yet, so leaving that as a 'maybe'
+
+        if tol is None:
+            # Use residual norm of the flowField as a reference
+            if self.nd != 4:
+                warn("If using checkSymms with just vf, supply a tolerance using kwarg tol")
+                tol = 1.0e-06
+                warn("tol has been set to 1.0e-06")
+            else:
+                tol = 100. * self.residuals().norm()
+                # Allow a factor of 100 over the residual norm, 
+                #  this is needed for unrestricted solutions
+
+
+        # Check sigma_1= T_{Lx/2,0} F_0 : [u,v,w](x,y,z) -> [u,v,-w](x+Lx/2, y, -z) 
+        if (self.view4d() - self.reflectZ().shiftPhase(phiX=np.pi) ).norm() <= tol:
+            symmsDict['sigma1'] = True
+
+        # Check sigma_2= T_{Lx/2,Lz/2} R_0 : [u,v,w](x,y,z) -> [-u,-v,w](-x+Lx/2, -y, z+Lz/2) 
+        if (self.view4d() - self.rotateZ().shiftPhase(phiX=np.pi,phiZ=np.pi) ).norm() <= tol:
+            symmsDict['sigma2'] = True
+
+        # Check sigma_3= T_{0,Lz/2} P_0 : [u,v,w](x,y,z) -> [-u,-v,-w](-x,-y, -z+Lz/2) 
+        if (self.view4d() - self.pointwiseInvert().shiftPhase(phiZ=np.pi) ).norm() <= tol:
+            symmsDict['sigma3'] = True
+       
+        if moreSymms:
+            print("Checking for symmetries other than sigma1, sigma2, sigma3 isn't available yet.")
+        
+        return symmsDict
+
 
 
 def _convolve(ff1,ff2):
@@ -1055,32 +1256,5 @@ def makeVector(*args):
             ff0 = ff0.appendField(ff)
     return ff0
 
-def translateField(x,dz=0.,dx=0.):
-    """ See shiftPhase(x,phiZ=0.,phiX=0.)"""
-    a = x.flowDict['alpha']; b = x.flowDict['beta']
-    phiX = a*dx
-    phiZ = b*dz
-    return shiftPhase(x,phiX=phiX, phiZ=phiZ)
-
-def shiftPhase(x0,phiZ=0., phiX=0.):
-    """ Translates/phase-shifts flowfield
-    Inputs: 
-        x0 : flowField instance
-        phiZ : (default: 0.) phase-shift in z
-        phiX : (default: 0.) phase-shift in x
-    Outputs: 
-        x : Phase-shifted flowField instance """
-    x = x0.copy().view4d()
-    if phiZ != 0.:
-        M = x.nz//2
-        mArr = np.arange(-M,M+1).reshape((1,1,x.nz,1,1))
-        phaseArr = np.exp(-1.j*mArr*phiZ)
-        x = phaseArr*x
-    if phiX != 0.:
-        L = x0.nx//2
-        lArr = np.arange(-L,L+1).reshape((1,x0.nx,1,1,1))
-        phaseArr = np.exp(-1.j*lArr*phiX)
-        x = phaseArr*x
-    return x
     
         
