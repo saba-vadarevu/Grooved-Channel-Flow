@@ -526,11 +526,9 @@ class flowField(np.ndarray):
     def div(self):
         """ Computes divergence of vector field as u_x+v_y+w_z
         If a flowField with more than 3 components (nd>3) is supplied, takes first three components as u,v,w."""
-        assert self.nd >= 3, ('Divergence is defined only for 3C fields')
         return self.getScalar(nd=0).ddx() + self.getScalar(nd=1).ddy() + self.getScalar(nd=2).ddz()
         
     def curl(self):
-        assert self.nd >= 3, 'curl3d method is defined only for 3C fields.'
         return makeVector(self.getScalar(nd=2).ddy() - self.getScalar(nd=1).ddz(),\
                          self.getScalar(nd=0).ddz() - self.getScalar(nd=2).ddx(),\
                          self.getScalar(nd=1).ddx() - self.getScalar(nd=0).ddy())
@@ -1186,7 +1184,7 @@ class flowField(np.ndarray):
         if tol is None:
             # Use residual norm of the flowField as a reference
             if self.nd != 4:
-                warn("If using checkSymms with just vf, supply a tolerance using kwarg tol")
+                warn("If using checkSymms with just vf, supply a tolerance using kwarg 'tol'")
                 tol = 1.0e-06
                 warn("tol has been set to 1.0e-06")
             else:
