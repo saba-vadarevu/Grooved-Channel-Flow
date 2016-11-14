@@ -544,7 +544,7 @@ class flowField(np.ndarray):
         """Computes inner product for two flowField objects, scalar or vector,
             by integrating {self[nd=j]*vec2[nd=j].conj()} along x_j, and adding the integrals for j=1,..,self.nd.
         Currently, only inner products of objects with identical dictionaries are supported"""
-        assert (self.flowDict == vec2.flowDict), 'Method for inner products is currently unable to handle instances with different flowDicts'
+        assert (self.shape == vec2.shape), 'Method for inner products is currently unable to handle instances with different flowDicts'
         
         w = clencurt(self.N).reshape((1,1,1,1,self.N))
 

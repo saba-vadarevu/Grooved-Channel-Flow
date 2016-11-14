@@ -38,7 +38,7 @@ def dict2ff(flowDict):
     return vf
 
 
-def linr(flowDict,complexType = np.complex): 
+def linr(flowDict,complexType = np.complex,sigma1=False): 
     """Returns matrix representing the linear operator for the equilibria/TWS for riblet case
     Linear operator for exact solutions isn't very different from that for laminar, 
         all inter-modal interaction remains the same for a fixed 'l'. 
@@ -139,16 +139,17 @@ def linr(flowDict,complexType = np.complex):
     L0wavy = L0wavy[:, N4*2*q0: -N4*2*q0]   # Getting rid of the extra column-blocks
     # And that concludes building L0wavy
 
+    M1 = M+1
     # For exact solutions, we have L!= 0
     #   So, I take L0wavy, and add i.l.alpha or -l**2.a**2 as appropriate
-    Lmat = np.zeros((L1*nz*N4,L1*nz*N4),dtype=complexType)
-    # Building only for non-positive streamwise modes. Wall effects only produce
-    #   interactions in the spanwise modes
-
-
-    mat1 = np.zeros((nz*N4,nz*N4),dtype=complexType); mat2 = mat1.copy()
     # Define mat1 and mat2 such that all 'l' terms in the linear matrix can be 
     #   written as l * mat1  + l^2 *mat2
+    mat1 = np.zeros((nz*N4,nz*N4),dtype=complexType); mat2 = mat1.copy()
+    # It's okay to define these matrices for nz*N4, I can just trim them to 
+    #   shape (M1*N4,M1*N4) later if sigma1 is to be imposed
+    #   I say it's okay because the extra memory used isn't significant compared
+    #       to the size of Lmat, which is 0.5*L1 times larger.
+
     for mp in range(nz):
         # Row numbers correspond to equation, column numbers to field variable
         #   mp*N4 +     (0:N)   : x-momentum or u
@@ -172,21 +173,72 @@ def linr(flowDict,complexType = np.complex):
 
         # continuity
         mat1[mp*N4+3*N:mp*N4+4*N, mp*N4 : mp*N4+N]      = 1.j*a*I
-
+    
     s1 = nz*N4
+    s2 = M1*N4
+    s3 = s1-s2
+
+    #%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+    # Sigma1=True did not make any difference to the section above this
+    # Only below do I start exploiting sigma1
+    #%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+    # If imposing sigma1, then all positive spanwise modes are also disregarded
+    if sigma1:
+        # mat1 and mat2 only need m<=0 modes if sigma1 is being imposed
+        mat1 = mat1[:s2, :s2]
+        mat2 = mat2[:s2, :s2]
+        Lmat = np.zeros((L1*s2,L1*s2),dtype=complexType)
+    else:
+        Lmat = np.zeros((L1*s1,L1*s1),dtype=complexType)
+    # Building only for non-positive streamwise modes. Wall effects only produce
+    #   interactions in the spanwise modes
+    
+    def _foldMat(L0wavyMat):
+        # Doing the folding now. 
+        tmpMat = L0wavyMat[:s2, s2:]   # Factors of m>0 fields (u,v,w,p) in equations for m<= 0
+        tmpMat = tmpMat.reshape((s2,s3//N4 , 4, N))  
+        # Re-arranging columns into chunks of N
+
+        tmpMat = tmpMat[:, ::-1]    # Re-ordering m-modes to go as (M,M-1,..,1) instead of (1,..,M)
+        tmpMat[:,:,2] *= -1.
+        # w has to be multiplied by an extra -1 than u,v,p
+        tmpMat = tmpMat.reshape((s2,s3))
+        return tmpMat
+    
     for lp in range(L1):
         l = lp-L
-        
-        # Matrix from laminar case where l=0
-        Lmat[lp*s1:(lp+1)*s1, lp*s1:(lp+1)*s1] = L0wavy
-        # Adding all the l-terms
-        Lmat[lp*s1:(lp+1)*s1, lp*s1:(lp+1)*s1] += l* mat1 + l**2 * mat2
+      
+        if sigma1:
+            # Folding the matrix along spanwise modes to impose sigma1:
+            #   u(l,-m) = (-1)^l u(l,m)
+            #   v(l,-m) = (-1)^l v(l,m)
+            #   w(l,-m) = (-1)^(l+1) w(l,m)
+            #   p(l,-m) = (-1)^l p(l,m)
+            
+            # Assigning m<=0 part of L0wavy as is 
+            Lmat[lp*s2:(lp+1)*s2, lp*s2:(lp+1)*s2] = L0wavy[:s2 , :s2]
+            # First index says only equations for m<=0 are included
+            # Second index says only contributions due to m<=0 of u,v,w,p are included (for now)
+            
+            Lmat[lp*s2:(lp+1)*s2, lp*s2:(lp+1)*s2-N4] += (-1.)**l * _foldMat(L0wavy) 
+            # The -N4 in the second index is because the folding only happens for m !=0,
+            #   The last N4 entries belong to m=0
+
+            # Adding all the l-terms
+            Lmat[lp*s2:(lp+1)*s2, lp*s2:(lp+1)*s2] += l* mat1 + l**2 * mat2
+        else:
+            # No folding in 'm' if sigma1 isn't imposed
+            Lmat[lp*s1:(lp+1)*s1, lp*s1:(lp+1)*s1] = L0wavy
+            # Adding all the l-terms
+            Lmat[lp*s1:(lp+1)*s1, lp*s1:(lp+1)*s1] += l* mat1 + l**2 * mat2
+
 
     return Lmat
 
 
 
-def jcbn(vf,Lmat=None):
+def jcbn(vf,Lmat=None,sigma1=False):
     if Lmat is None:
         warn('The Jacobian is added in-place to Lmat. Always supply Lmat. Returning.....')
         return
@@ -516,10 +568,16 @@ def iterate(vf=None, pf=None,iterMax= 6, tol=5.0e-10,rcond=1.0e-07,complexType=n
             print('Least squares problem returned residual norm:',linNorm,' which is greater than tolerance:',linTol)
             
        
-       
+        L = x.nx//2; M = x.nz//2 
         dxff = x.zero()
-        dxff[0,:x.nx//2+1] = dx.reshape((x.nx//2+1,x.nz,4,x.N))
-        dxff[0,x.nx//2+1:] = np.conj(dxff[0, x.nx//2-1::-1, ::-1])
+        dx = dx.reshape((L+1,x.nz,4,x.N))
+        dxff[0,:L+1] = dx[:]    # Modes l<=0 
+        dxff[0,L+1:] = np.conj(dx[ L-1::-1, ::-1])  # Modes l>0
+
+        # Real-valuedness
+        dxff[0] = 0.5* (dxff[0] +  np.conj(dx[0, ::-1, ::-1]) )    
+
+        # Velocity BC on the walls 
         dxff[0,:,:,:3,[0,-1]] = 0.
 
         if doLineSearch:
@@ -711,11 +769,14 @@ def testExactRibletModule(L=4,M=7,N=35,epsArr=np.array([0.,0.05,0.02,0.03]),comp
     pf = h52ff('testFields/pres_eq1.h5',pres=True)
     vf = vf.slice(L=L,M=M,N=N); pf = pf.slice(L=L,M=M,N=N)
     vf.flowDict.update({'epsArr':epsArr}); pf.flowDict.update({'epsArr':epsArr})
-    
-    Lmat = linr(vf.flowDict,complexType=complexType)
+   
+    # Verifying rib.linr() and rib.jcbn() when sigma1 is not imposed
+    print('Verifying rib.linr(sigma1=False)...')
+    Lmat = linr(vf.flowDict,complexType=complexType,sigma1=False)
     x = vf.appendField(pf)
-    
-    linTerm = np.dot(Lmat, x[0,:x.nx//2+1].flatten())
+   
+    xArr = x.copyArray()
+    linTerm = np.dot(Lmat, xArr[0,:x.nx//2+1].flatten())
 
     nex = 5
 
@@ -726,25 +787,43 @@ def testExactRibletModule(L=4,M=7,N=35,epsArr=np.array([0.,0.05,0.02,0.03]),comp
     linTermClass = linTermClass.appendField(vf1.div()).slice(L=vf.nx//2,M=vf.nz//2)
 
     Lmat[:] = 0.
-    jcbn(vf,Lmat=Lmat)
+    print('Verifying rib.jcbn(sigma1=False)...')
+    jcbn(vf,Lmat=Lmat,sigma1=False)
 
 
-    NLterm = 0.5*np.dot(Lmat, x[0,:x.nx//2+1].flatten())
+    NLterm = 0.5*np.dot(Lmat, xArr[0,:x.nx//2+1].flatten())
 
     NLtermClassFine = vf1.convNL()
     NLtermClass = NLtermClassFine.slice(L=vf.nx//2, M=vf.nz//2).appendField(pf.zero())
 
-    linTestResult =  np.linalg.norm(linTerm - linTermClass[0,:x.nx//2+1].flatten()) <= tol
-    NLtestResult = np.linalg.norm(NLterm - NLtermClass[0,:x.nx//2+1].flatten()) <= tol
-    if not linTestResult :
-        print('Residual norm for linear is:',np.linalg.norm(linTerm - linTermClass[0,:x.nx//2+1].flatten()))
-    if not  NLtestResult:
-        print('Residual norm for non-linear is:',np.linalg.norm(NLterm - NLtermClass[0,:x.nx//2+1].flatten()))
+    linTestResult =  chebnorm(linTerm - linTermClass[0,:x.nx//2+1].flatten(),x.N) <= tol
+    NLtestResult = chebnorm(NLterm - NLtermClass[0,:x.nx//2+1].flatten(),x.N) <= tol
 
-    if linTestResult and NLtestResult:
-        print("Success for both tests!")
+
+
+
+    if not linTestResult :
+        print('Residual norm for linear without sigma1 is:',chebnorm(linTerm - linTermClass[0,:x.nx//2+1].flatten(),x.N))
+    if not  NLtestResult:
+        print('Residual norm for non-linear without sigma1 is:',chebnorm(NLterm - NLtermClass[0,:x.nx//2+1].flatten(),x.N))
     
-    return linTestResult, NLtestResult
+    # Verifying linr() and jcbn() when sigma1 is imposed
+    print('Verifying rib.linr(sigma1=True)...')
+    Lmat1 = linr(vf.flowDict, complexType=complexType, sigma1=True)
+    linTerm1 = np.dot(Lmat1, xArr[0,:x.nx//2+1, :x.nz//2+1].flatten()).flatten()
+
+    s1 = x.nz*4*x.N; M1 = x.nz//2 +1; s2 = M1*4*x.N
+    linTerm2 = linTerm.reshape((x.nx//2+1, s1))[:, :s2].flatten()
+    # Removing the terms for m > 0 from linTerm calculated without sigma1 
+
+    linTestResult1 =  chebnorm(linTerm1 - linTerm2, x.N) <= tol
+    if not linTestResult1 :
+        print('Residual norm for linear with sigma1 is:',chebnorm(linTerm1 - linTerm2,x.N))
+
+    if linTestResult and NLtestResult and linTestResult1:
+        print("Success for all tests!")
+    
+    return linTestResult, NLtestResult, linTestResult1
 
 
 
