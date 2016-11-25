@@ -38,7 +38,7 @@ def dict2ff(flowDict):
     return vf
 
 
-def linr(flowDict,complexType = np.complex): 
+def linr(flowDict,complexType = np.complex, sigma1 = True): 
     """Returns matrix representing the linear operator for the equilibria/TWS for riblet case
     Linear operator for exact solutions isn't very different from that for laminar, 
         all inter-modal interaction remains the same for a fixed 'l'. 
@@ -57,15 +57,10 @@ def linr(flowDict,complexType = np.complex):
         if epsArr.ndim !=1: warn("epsArr is not a 1-D array. Fix this.")
     else:
         epsArr = np.array([0., flowDict['eps']])
-    if False:
-        assert flowDict['L'] != 0 and flowDict['M'] != 0
-        if flowDict['L'] > 4: 
-            print('L is set to 4 from ', flowDict['L'] )
-            flowDict.update({'L':4})
-        if flowDict['M'] > 8:
-            print('M is set to 8 from ', flowDict['M'] )
-            flowDict.update({'M':8})
-    # Lmat_lam = lam.linr(updateDict(flowDict,{'L':0,'alpha':0.}))
+
+    if complexType is not np.complex:
+        warn("complexType is set to np.complex. Other implementations not currently available.")
+        complexType = np.complex
 
     L = flowDict['L']; M = flowDict['M']
     L1 = L+1
@@ -77,12 +72,10 @@ def linr(flowDict,complexType = np.complex):
 
     N  = int(flowDict['N']); N4 = 4*N
     y,DM = chebdif(N,2)
-    if complexType is np.complex64:
-        DM = np.float32(DM)
     D = DM[:,:,0].reshape((N,N)); D2 = DM[:,:,1].reshape((N,N))
     # Change N, D, and D2 if imposing point-wise inversion symmetries
-        
-    I = np.identity(N,dtype=complexType); Z = np.zeros((N,N),dtype=complexType)
+
+    I = np.identity(N); Z = np.zeros((N,N))
 
     def _assignL0flat(L0flat,m):
         assert (L0flat.shape[0] == N4) and (L0flat.shape[1] == N4)
@@ -101,7 +94,7 @@ def linr(flowDict,complexType = np.complex):
         return
 
     Tz, Tzz, Tz2 = Tderivatives(updateDict(flowDict,{'epsArr':epsArr})) 
-    
+
     q0 = epsArr.size-1
     # -1 because epsArr includes zeroth mode
 
@@ -139,17 +132,24 @@ def linr(flowDict,complexType = np.complex):
     L0wavy = L0wavy[:, N4*2*q0: -N4*2*q0]   # Getting rid of the extra column-blocks
     # And that concludes building L0wavy
 
+    if sigma1:
+        nz1 = M+1
+    else:
+        nz1 = nz
+    # Building Lmat for only m<= 0
+
+    nx = 2*L+1
     # For exact solutions, we have L!= 0
     #   So, I take L0wavy, and add i.l.alpha or -l**2.a**2 as appropriate
-    Lmat = np.zeros((L1*nz*N4,L1*nz*N4),dtype=complexType)
-    # Building only for non-positive streamwise modes. Wall effects only produce
-    #   interactions in the spanwise modes
+    Lmat = np.zeros((nx*nz1*N4,nx*nz1*N4),dtype=complexType)
+    # If imposing sigma1, build for only m <= 0 
 
 
-    mat1 = np.zeros((nz*N4,nz*N4),dtype=complexType); mat2 = mat1.copy()
+    mat1 = np.zeros((nz1*N4,nz1*N4),dtype=complexType); mat2 = mat1.copy()
     # Define mat1 and mat2 such that all 'l' terms in the linear matrix can be 
     #   written as l * mat1  + l^2 *mat2
-    for mp in range(nz):
+    # Their definition remains unchanged with imposition of sigma1
+    for mp in range(nz1):
         # Row numbers correspond to equation, column numbers to field variable
         #   mp*N4 +     (0:N)   : x-momentum or u
         #               (N:2N)  : y-momentum or v
@@ -173,14 +173,44 @@ def linr(flowDict,complexType = np.complex):
         # continuity
         mat1[mp*N4+3*N:mp*N4+4*N, mp*N4 : mp*N4+N]      = 1.j*a*I
 
-    s1 = nz*N4
-    for lp in range(L1):
-        l = lp-L
         
+    s1 = nz1*N4
+    s3 = nz*N4
+    s2 = s3-s1
+
+    if sigma1:
+        # To add linear inter-modal contributions due to m > 0 modes
+        #    to equations for m <= 0;
+        # u_{l,-m} = (-1)^l u_{l,m}, v_{l,-m} = (-1)^l v_{l,m}, 
+        # w_{l,-m} =-(-1)^l w_{l,m}, p_{l,-m} = (-1)^l p_{l,m} 
+        # Equations for m <= 0 correspond to L0wavy[:s1]
+        # Contributions due to m > 0 correspond to L0wavy[., s1:]
+        # They need to be rearranged into N4xN4 blocks (for each Fourier mode),
+        #    and then multiplied by (-1)^l. 'w' needs to be multiplied with an extra -1
+        L0wavyTemp = L0wavy[:s1, s1:].reshape((s1, s2//N4, N4))
+
+        # Now, reordering so that modes go as M, M-1,...,1
+        L0wavyTemp = L0wavyTemp[:, ::-1]
+
+        # Multiplying the spanwise velocity with -1
+        L0wavyTemp[ :, :, 2*N:3*N] *= -1.
+        # Finally, reshaping
+        L0wavyTemp = L0wavyTemp.reshape((s1, s2))
+        # Now we're ready to multiply with (-1)^l and add to Lmat
+        
+
+    for lp in range(nx):
+        l = lp-L
+
+        # Using s1 instead of nz*N4. If sigma1 is False, there is no difference
         # Matrix from laminar case where l=0
-        Lmat[lp*s1:(lp+1)*s1, lp*s1:(lp+1)*s1] = L0wavy
+        Lmat[lp*s1:(lp+1)*s1, lp*s1:(lp+1)*s1] = L0wavy[:s1, :s1]
         # Adding all the l-terms
         Lmat[lp*s1:(lp+1)*s1, lp*s1:(lp+1)*s1] += l* mat1 + l**2 * mat2
+        
+        if sigma1:
+            # Adding L0wavyTemp:
+            Lmat[lp*s1:(lp+1)*s1, lp*s1: lp*s1+s2] += (-1.)**l  * L0wavyTemp
 
     return Lmat
 
@@ -708,26 +738,38 @@ def linrInv(flowDict):
     
 
 
-def testExactRibletModule(L=4,M=7,N=35,epsArr=np.array([0.,0.05,0.02,0.03]),complexType=np.complex128):
+def testExactRibletModule(L=4,M=7,N=35,epsArr=np.array([0.,0.05,0.02,0.03]),sigma1=True,complexType=np.complex):
     vf = h52ff('testFields/eq1.h5')
     pf = h52ff('testFields/pres_eq1.h5',pres=True)
     vf = vf.slice(L=L,M=M,N=N); pf = pf.slice(L=L,M=M,N=N)
     vf.flowDict.update({'epsArr':epsArr}); pf.flowDict.update({'epsArr':epsArr})
     
-    Lmat = linr(vf.flowDict,complexType=complexType)
+    Lmat = linr(vf.flowDict,complexType=complexType,sigma1=sigma1)
     x = vf.appendField(pf)
     
-    linTerm = np.dot(Lmat, x[0,:x.nx//2+1].flatten())
+    if sigma1:
+        xm_ = x.copyArray()[0,:,:x.nz//2+1].flatten()
+        linTerm = np.dot(Lmat, xm_)
+    else:
+        linTerm = np.dot(Lmat, x.flatten())
+
 
     nex = 5
 
     vf1 = vf.slice(L=vf.nx//2+nex, M = vf.nz//2+nex)
     pf1 = pf.slice(L=vf.nx//2+nex, M = vf.nz//2+nex)
     
-    linTermClass = -1./vf.flowDict['Re']*vf1.laplacian() + pf1.grad()
-    linTermClass = linTermClass.appendField(vf1.div()).slice(L=vf.nx//2,M=vf.nz//2)
 
-    Lmat[:] = 0.
+    linTermClass = (vf1.laplacian()/(-1.*vf1.flowDict['Re']) + pf1.grad()).appendField(vf1.div())
+    linTermClass = linTermClass.slice(L=vf.nx//2, M=vf.nz//2)
+    if sigma1:
+        linTestResult = chebnorm(linTerm - linTermClass.copyArray()[0,:,:x.nz//2+1].flatten(), x.N) <= tol
+        print('sigma1 invariance norm of x is', (x - x.reflectZ().shiftPhase(phiX=np.pi) ).norm())
+    else:
+        linTestResult = chebnorm(linTerm - linTermClass.copyArray().flatten(), x.N) <= tol
+
+
+    Lmat = np.zeros(( (x.nx//2 +1) * x.nz *4*N , (x.nx//2 +1) * x.nz *4*N ), dtype=np.complex)
     jcbn(vf,Lmat=Lmat)
 
 
@@ -736,7 +778,6 @@ def testExactRibletModule(L=4,M=7,N=35,epsArr=np.array([0.,0.05,0.02,0.03]),comp
     NLtermClassFine = vf1.convNL()
     NLtermClass = NLtermClassFine.slice(L=vf.nx//2, M=vf.nz//2).appendField(pf.zero())
 
-    linTestResult =  np.linalg.norm(linTerm - linTermClass[0,:x.nx//2+1].flatten()) <= tol
     NLtestResult = np.linalg.norm(NLterm - NLtermClass[0,:x.nx//2+1].flatten()) <= tol
     if not linTestResult :
         print('Residual norm for linear is:',np.linalg.norm(linTerm - linTermClass[0,:x.nx//2+1].flatten()))
