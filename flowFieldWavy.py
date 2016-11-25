@@ -659,9 +659,9 @@ class flowFieldRiblet(flowFieldWavy):
         if ('epsArr' in self.flowDict):
             if not (isinstance(self.flowDict['epsArr'],np.ndarray)): 
                 warn("flowDict['epsArr'] is not a numpy array. Fix this.")
-            self.flowDict['epsArr'] = np.float32(self.flowDict['epsArr'])
+            self.flowDict['epsArr'] = np.float64(self.flowDict['epsArr'])
         else:
-            self.flowDict['epsArr'] = np.array([0.,self.flowDict['eps']],dtype=np.float32)
+            self.flowDict['epsArr'] = np.array([0.,self.flowDict['eps']],dtype=np.float64)
 
         return
 
@@ -890,12 +890,12 @@ def Tderivatives(flowDict,complexType=np.complex128):
     # First entry of epsArr is the amplitude of zeroth groove-mode, and is set to zero
     
     if 'epsArr' in flowDict:    
-        epsArr = np.float32(flowDict['epsArr'] )
+        epsArr = np.float64(flowDict['epsArr'] )
         if epsArr[0] != 0.:
             print("epsArr is", epsArr)
             warn('eps_0 is not zero. The code becomes inconsistent when it is not. Have a look.')
     else:
-        epsArr = np.array([0.,flowDict['eps']], dtype=np.float32)
+        epsArr = np.array([0.,flowDict['eps']], dtype=np.float64)
     b = flowDict['beta']; b2 = b**2
     q0 = epsArr.size-1
     # Populating arrays T_z(q), T_zz(q), and T^2_z(q)

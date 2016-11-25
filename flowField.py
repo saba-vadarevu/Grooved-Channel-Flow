@@ -548,7 +548,7 @@ class flowField(np.ndarray):
         
         w = clencurt(self.N).reshape((1,1,1,1,self.N))
 
-        return (1./2.)*flowField.__sumAll(self.view4d()*vec2.conjugate().view4d()*w)
+        return np.real((1./2.)*flowField.__sumAll(self.view4d()*vec2.conjugate().view4d()*w))
    
 
     def norm(self):

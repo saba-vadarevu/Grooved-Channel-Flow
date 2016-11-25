@@ -480,7 +480,7 @@ def lineSearch(normFun,x0,dx,arr=None):
 
 def iterate(vf=None, pf=None,iterMax= 6, tol=5.0e-10,rcond=1.0e-07,complexType=np.complex,doLineSearch=True):
     if pf is None: pf = vf.getScalar().zero()
-    resnormFun = lambda x: _residual(x).norm()
+    resnormFun = lambda x: x.residuals().appendField(x.div()).norm() 
 
     x = vf.appendField(pf)
 
@@ -520,6 +520,8 @@ def iterate(vf=None, pf=None,iterMax= 6, tol=5.0e-10,rcond=1.0e-07,complexType=n
         dxff = x.zero()
         dxff[0,:x.nx//2+1] = dx.reshape((x.nx//2+1,x.nz,4,x.N))
         dxff[0,x.nx//2+1:] = np.conj(dxff[0, x.nx//2-1::-1, ::-1])
+
+        dxff[0] = 0.5*(dxff[0] + np.conj(dxff[0,::-1,::-1]))
         dxff[0,:,:,:3,[0,-1]] = 0.
 
         if doLineSearch:
@@ -537,7 +539,7 @@ def iterate(vf=None, pf=None,iterMax= 6, tol=5.0e-10,rcond=1.0e-07,complexType=n
         if fnorm <= tol:
             flg = 0
             print('Converged in ',n+1,' iterations. Returning....................................')
-            return vf, pf, np.array(fnormArr), flg
+            return x.slice(nd=[0,1,2]), x.getScalar(nd=3), np.array(fnormArr), flg
         
         if n>0:
             if fnormArr[n] > fnormArr[n-1]:
