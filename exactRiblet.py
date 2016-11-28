@@ -216,10 +216,16 @@ def linr(flowDict,complexType = np.complex, sigma1 = True):
 
 
 
-def jcbn(vf,Lmat=None):
+def jcbn(vf,Lmat=None,sigma1=True):
     if Lmat is None:
         warn('The Jacobian is added in-place to Lmat. Always supply Lmat. Returning.....')
         return
+
+    if sigma1:
+        nz1 = vf.nz//2 + 1
+    else:
+        nz1 = vf.nz
+
     a = vf.flowDict['alpha']; b = vf.flowDict['beta']
     epsArr = vf.flowDict['epsArr']
     q0 = epsArr.size-1
@@ -238,10 +244,10 @@ def jcbn(vf,Lmat=None):
     D.astype(Lmat.dtype)
 
     # Index of the first row/column of the block for any wavenumber vector (l,m)
-    iFun = lambda l,m: (l+L)*(vf.nz*4*N) + (m+M)*4*N
-    
-    G = Lmat
-    assert (G.shape[0] == (L+1)*vf.nz*4*N) and (G.shape[1] == (L+1)*vf.nz*4*N)
+    iFun = lambda l,m: (l+L)*(nz1*4*N) + (m+M)*4*N
+
+    Gmat = Lmat
+    assert (Gmat.shape[0] == vf.nx*nz1*4*N) and (Gmat.shape[1] == vf.nx*nz1*4*N)
 
     # I will be using the functions np.diag() and np.dot() quite often, so,
     diag = np.diag; dot = np.dot
@@ -269,91 +275,47 @@ def jcbn(vf,Lmat=None):
 
     # Strictly speaking, what I'm building is not the Jacobian G
     # I'm building G such that N(\chi) = 0.5 * G * \chi, where \chi is the state-vector
-    # In earlier implementations, G differed from the Jacobian of N only in terms of
+    # G differs from the Jacobian of N only in terms of
     #                           d/du (u') being written as D instead of u''/ u' (which might produces NaNs)
-    # This time, ignoring l > 0 in the state-vector causes greater deviations for G from the true Jacobian
-    # For now, I shall ignore all this until I see convergence issues.
-    #   Using a modified Jacobian isn't necessarily a bad thing anyway.
-
-    # What the above comments mean is, I will split the below looping into two cases:
-    # For a term in phi, u_l'm' * u_{l-l',m-m'}, if both l' and l-l' are > 0, it is accounted for  
-    #   by populating the l-l',m-m' column-block with 2*u_{l',m'} (or vice-versa),
-    #   so that 0.5* G * \chi returns phi_{l,m}
-    # When both l' and l-l' are <=0, the corresponding term is split into 
-    #   {0.5*u_{l',m'}} *u_{l-l',m-m'} + {0.5*u_{l-l',m-m'} } * u_{l',m'},
-    #   and twice the factors in the curly braces go into the appropriate column-blocks of G
-    # This is a really hacky way to do the whole thing, but if it works, that's all that matters.
 
     # Final piece of notation: 
     ia = 1.j*a; ib = 1.j*b
 
-    for l in range(-L,1):
-        for m in range(-M,M+1):
+    if sigma1:
+        M1 = 1
+    else:
+        M1 = M+1
+
+        
+    # The convection term has this form:
+    # phi^{lm}_{1,2,3} = \sum_lp \sum_mp  u_{l-lp,m-mp} u_{lp,mp}  , 
+    #    disregarding the surface influence terms. 
+    # Gmat is the actual non-linear jacobian
+    # G is a temporary matrix created for each 'lp' in equations for each (l,m) in the Jacobian,
+    # If sigma1 is to be imposed,
+    #    G is folded and multiplied with (-1)**lp before being assigned to the
+    #        corresponding rows and columns in Gmat
+    # Otherwise, G is added as is
+    G = np.zeros((4*N, vf.nz*4*N), dtype=np.complex)
+
+
+    for l in range(-L,L+1):
+        for m in range(-M,M1):
             # Index of first row in the block for equations for wavenumbers (l,m)
             rInd = iFun(l,m)
             # l1,m2 are the wavenumbers in phi^j_{lm}
-            for lp in range(-L,l):
-                # For these lp,   l-lp must be >0
-                # So the u_{l-l', m-m'} must have l-l' >0,
-                #   meaning they are populated as 2*u_{l-l',m-m'}
+
+            for lp in range(-L,L+1):
+                G[:] = 0.    # Getting rid of G from previous 
+                rInd = 0     # We're only writing equations for one l,m, lp
+                # G contains the part of the Jacobian that multiplies the mode (lp,:)
+                #    in the equations for (l,m)
+                # I will define this without assuming symmetries
+                # When adding to Gmat, I will fold G on itself
+                
                 for mp in range(-M,M+1):
-                    cInd = iFun(lp,mp)
-                    if (-L <= (l-lp) <= L):
-                        li = l-lp+L # Array index for streamwise wavenumber l-lp
-
-                        # First, all the terms not relating to wall-effects
-                        if (-M <= (m-mp) <= M):
-                            mi = m-mp+M # Array index for spanwise wavenumber m-mp
-                            # phi^1_{l,m}: factors of terms with  u_{lp,mp}:
-                            G[ rInd+0*N : rInd+1*N , cInd+0*N : cInd+1*N ] += \
-                                    2.*( l*ia* diag(u[li, mi])  + v[li,mi].reshape((N,1)) *D + diag(w[li,mi])*mp*ib )
-                            # phi^1_{l,m}: factors of terms with  v_{lp,mp}:
-                            G[ rInd+0*N : rInd+1*N , cInd+1*N : cInd+2*N ] += 2.*(diag(uy[li, mi]))
-                            # phi^1_{l,m}: factors of terms with  w_{lp,mp}:
-                            G[ rInd+0*N : rInd+1*N , cInd+2*N : cInd+3*N ] += 2.*((m-mp)*ib*diag(u[li, mi]))
-
-                            # phi^2_{l,m}: factors of terms with  v_{lp,mp}:
-                            G[ rInd+1*N : rInd+2*N , cInd+1*N : cInd+2*N ] += \
-                                    2.* (    lp*ia* diag(u[li, mi])  + v[li,mi].reshape((N,1)) *D + diag(w[li,mi])*mp*ib \
-                                    + diag(vy[li,mi])   )
-                            # phi^2_{l,m}: factors of terms with  u_{lp,mp}:
-                            G[ rInd+1*N : rInd+2*N , cInd+0*N : cInd+1*N ] += 2.*  ((l-lp)*ia*diag(v[li, mi])  )
-                            # phi^2_{l,m}: factors of terms with  w_{lp,mp}:
-                            G[ rInd+1*N : rInd+2*N , cInd+2*N : cInd+3*N ] += 2.*  ((m-mp)*ib*diag(v[li, mi])  )
-
-                            # phi^3_{l,m}: factors of terms with  w_{lp,mp}:
-                            G[ rInd+2*N : rInd+3*N , cInd+2*N : cInd+3*N ] += \
-                                    2.*(  lp*ia* diag(u[li, mi])  + v[li,mi].reshape((N,1)) *D + m*ib*diag(w[li,mi])  )
-                            # phi^3_{l,m}: factors of terms with  v_{lp,mp}:
-                            G[ rInd+2*N : rInd+3*N , cInd+1*N : cInd+2*N ] += 2.*(   diag(wy[li, mi]) )
-                            # phi^3_{l,m}: factors of terms with  u_{lp,mp}:
-                            G[ rInd+2*N : rInd+3*N , cInd+0*N : cInd+1*N ] += 2.*(   (l-lp)*ia*diag(w[li, mi])  )
-
-                        # Now, the terms arising due to wall effects
-                        # The interactions in l are unaffected since Tz only have e^iqb
-
-                        for q in range(-q0,q0+1):
-
-                            if (-M <= (m-mp+q) <= M):
-                                mi = m-mp+q+M # Array index for spanwise wavenumber m-mp
-                                # phi^1_{l,m}: factors of terms with u_{lp,mp}
-                                G[ rInd+0*N : rInd+1*N , cInd+0*N : cInd+1*N ] += 2.*Tz[q0-q]* w[li,mi].reshape((N,1)) * D 
-                                # phi^1_{l,m}: factors of terms with w_{lp,mp}
-                                G[ rInd+0*N : rInd+1*N , cInd+2*N : cInd+3*N ] += 2.*Tz[q0-q]* diag(uy[li,mi]) 
-
-                                # phi^2_{l,m}: factors of terms with v_{lp,mp}
-                                G[ rInd+1*N : rInd+2*N , cInd+1*N : cInd+2*N ] += 2.*Tz[q0-q]* w[li,mi].reshape((N,1)) * D 
-                                # phi^2_{l,m}: factors of terms with w_{lp,mp}
-                                G[ rInd+1*N : rInd+2*N , cInd+2*N : cInd+3*N ] += 2.*Tz[q0-q]* diag(vy[li,mi]) 
-
-                                # phi^3_{l,m}: factors of terms with w_{lp,mp}
-                                G[ rInd+2*N : rInd+3*N , cInd+2*N : cInd+3*N ] += 2.*Tz[q0-q]* w[li,mi].reshape((N,1)) * D \
-                                        +2.*Tz[q0-q]* diag(wy[li,mi]) 
- 
-            # Repeating the above for lp >= l, so that both lp and l-lp are <= 0                        
-            for lp in range(l,1):
-                for mp in range(-M,M+1):
-                    cInd = iFun(lp,mp)
+                    #cInd = iFun(lp,mp)
+                    cInd = iFun(-L,mp)  # Because I'm writing G for only one 'l'
                     if (-L <= (l-lp) <= L):
                         li = l-lp+L # Array index for streamwise wavenumber l-lp
 
@@ -405,6 +367,35 @@ def jcbn(vf,Lmat=None):
                                 # phi^3_{l,m}: factors of terms with w_{lp,mp}
                                 G[ rInd+2*N : rInd+3*N , cInd+2*N : cInd+3*N ] += Tz[q0-q]* w[li,mi].reshape((N,1)) * D \
                                         +Tz[q0-q]* diag(wy[li,mi]) 
+                # Now, G is ready to be folded if sigma1 holds
+                if sigma1:
+                    if False:
+                        Gtemp = np.zeros((4*N, M+1, 4*N), dtype=Gmat.dtype)
+                        Gnew = G.reshape((4*N, vf.nz, 4,N))
+                        Gnew[:, M:,2] = -1.* Gnew[:, M:, 2]   # w-factors need to be multiplied with an extra -1
+                        # Because sigma1 goes u_{l,m} = (-1)^l  u_{l,-m} (same for v and p)
+                        #               but   w_{l,m} = (-1)^{l+1} w_{l,-m}
+                        Gnew = Gnew.reshape((4*N, vf.nz, 4*N))
+
+                        Gtemp[:] = Gnew[:, :M+1]   # Factors of non-positive modes are assigned as are
+                        Gtemp[:,:M] += (-1.)**lp  * Gnew[:, :M:-1]   # Need to assign M to -M, (M-1) to -(M-1) and so on..
+                        # Reshaping to a matrix
+                        Gtemp = Gtemp.reshape((4*N, nz1*4*N))
+                        # And that's it. We're ready to add to Gmat
+                    else:
+                        Gtemp = G[:, nz1*4*N:].reshape((4*N, M, 4*N))
+                        Gtemp = Gtemp[:,::-1]
+                        Gtemp[:,:, 2*N:3*N] *= -1.
+                        Gtemp = Gtemp.reshape((4*N, M*4*N))
+                        
+                        
+                    
+                
+                cInd = iFun(lp, -M)
+                rInd = iFun(l,m)
+                Gmat[rInd: rInd+4*N, cInd: cInd+nz1*4*N] = G[:,:nz1*4*N]
+                if sigma1:
+                    Gmat[rInd: rInd+4*N, cInd: cInd+M*4*N] += (-1.)**lp * Gtemp
 
 
     return  
@@ -735,6 +726,59 @@ def linrInv(flowDict):
         LmatInv[lp] = np.linalg.pinv(Ltemp)
 
     return LmatInv
+
+def averagedU(vf,nd=0, zArr = None, ny = 50):
+    """ Velocity averaged in wall-parallel directions in physical domain"""
+    b = vf.flowDict['beta']; Lz = 2.*np.pi/b
+    epsArr = vf.flowDict['epsArr']
+    if zArr is None:
+        # Use 500 z-points for averaging
+        nz = 500.
+        zArr = np.arange(0., Lz, Lz/nz)
+    
+    
+    yWalls = np.zeros(zArr.size)
+    # Wall contour
+    for k in range(epsArr.size):
+        eps = epsArr[k]
+        yWalls  += 2.*eps*np.cos(k*b*zArr)
+    yMax = np.amax(yWalls); yMin = np.amin(yWalls)
+    # At each z location, flowfield class assumes y goes from -1 to 1, 
+    #    but it actually goes from -1+yWalls to 1+yWalls
+    # I want the velocity profile going from -1+yMax to 1+yMin
+    # To keep things simple, I'll use a uniform grid between -1+yMax and 1+yMin
+    # At any z, I will need to interpolate the velocity from 
+    #      -1 + (yMax -yWalls(z)) to
+    #       1 - (yWalls(z) -yMin)
+    # Let's define yb = -1 + (yMax - yWalls(z) )  and yt = 1 - (yWalls(z) - yMin)
+    yb = -1. + yMax - yWalls
+    yt = 1.  + yMin - yWalls
+    
+    vfArr = vf.getScalar(nd=nd).slice(L=0).copyArray()[0,0,:,0]  
+    # Don't need l !=0 modes in averaging
+    mArr = np.arange(-(vf.nz//2), vf.nz//2 +1).reshape((vf.nz,1))
+    
+    def _ifftAvgU(zLoc,yArr):
+        # First, getting field on cheb nodes at zLoc:
+        vTemp = np.real(np.sum( vfArr* np.exp(1.j*mArr*b*zLoc) , axis=0))
+        # Interpolating onto the new grid, yArr and returning
+        return chebint(vTemp,yArr)
+    
+    # Now, start with a zero array,
+    vArr = np.zeros(ny+1)
+    for k in range(zArr.size):
+        yLocs = np.arange(yb[k], 1.0001*yt[k], (yt[k]-yb[k])/ny )
+        vArr += _ifftAvgU(zArr[k], yLocs)
+    
+    vArr = vArr/zArr.size
+    
+    yArr = np.arange(-1.+yMax, 1.0001*(1.+yMin), (2+yMin-yMax)/ny)
+    
+    return yArr, vArr
+    
+    
+
+
     
 
 
@@ -769,16 +813,25 @@ def testExactRibletModule(L=4,M=7,N=35,epsArr=np.array([0.,0.05,0.02,0.03]),sigm
         linTestResult = chebnorm(linTerm - linTermClass.copyArray().flatten(), x.N) <= tol
 
 
-    Lmat = np.zeros(( (x.nx//2 +1) * x.nz *4*N , (x.nx//2 +1) * x.nz *4*N ), dtype=np.complex)
-    jcbn(vf,Lmat=Lmat)
+    # Lmat = np.zeros(( (x.nx//2 +1) * x.nz *4*N , (x.nx//2 +1) * x.nz *4*N ), dtype=np.complex)
+    Lmat[:] = 0.
+    jcbn(vf,Lmat=Lmat,sigma1=sigma1)
 
-
-    NLterm = 0.5*np.dot(Lmat, x[0,:x.nx//2+1].flatten())
+    if sigma1:
+        xm_ = x.copyArray()[0,:,:x.nz//2+1].flatten()
+        NLterm = 0.5*np.dot(Lmat, xm_)
+    else:
+        NLterm = 0.5*np.dot(Lmat, x.flatten())
 
     NLtermClassFine = vf1.convNL()
     NLtermClass = NLtermClassFine.slice(L=vf.nx//2, M=vf.nz//2).appendField(pf.zero())
 
-    NLtestResult = np.linalg.norm(NLterm - NLtermClass[0,:x.nx//2+1].flatten()) <= tol
+    if sigma1:
+        NLtestResult = chebnorm(NLterm - NLtermClass.copyArray()[0,:,:x.nz//2+1].flatten(), x.N) <= tol
+        print('sigma1 invariance norm of x is', (x - x.reflectZ().shiftPhase(phiX=np.pi) ).norm())
+    else:
+        NLtestResult = np.linalg.norm(NLterm - NLtermClass.flatten()) <= tol
+
     if not linTestResult :
         print('Residual norm for linear is:',np.linalg.norm(linTerm - linTermClass[0,:x.nx//2+1].flatten()))
     if not  NLtestResult:

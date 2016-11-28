@@ -565,7 +565,13 @@ class flowField(np.ndarray):
         """ Kinetic energy density, E =  1/Vol. * \int_{vol} 0.5 * || v ||^2  d vol
         The volume integral (per unit volume) of |v|**2 is simply the square of the norm of the velocity 
         """
-        return 0.5*(self.slice(nd=[0,1,2]).norm())**2
+        if self.nd > 3:
+            energyDensity = 0.5*(self.slice(nd=[0,1,2]).norm())**2
+        else:
+            energyDensity = 0.5*(self.norm())**2
+
+        return energyDensity
+
 
     def powerInput(self,tol=1.0e-07):
 
