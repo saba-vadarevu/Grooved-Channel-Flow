@@ -393,7 +393,7 @@ def jcbn(vf,Lmat=None,sigma1=True):
                 
                 cInd = iFun(lp, -M)
                 rInd = iFun(l,m)
-                Gmat[rInd: rInd+4*N, cInd: cInd+nz1*4*N] = G[:,:nz1*4*N]
+                Gmat[rInd: rInd+4*N, cInd: cInd+nz1*4*N] += G[:,:nz1*4*N]
                 if sigma1:
                     Gmat[rInd: rInd+4*N, cInd: cInd+M*4*N] += (-1.)**lp * Gtemp
 
@@ -416,20 +416,20 @@ def makeSystem(vf=None,pf=None, complexType=np.complex):
     Outputs:
         residualBC: 1-d array
         jacobianBC: 2-d array"""
-    
+    sigma1=False 
     N = vf.N; N4 = 4*N
     L = vf.nx//2; M = vf.nz//2
     L1 = L+1; nz=vf.nz
     if pf is None:
         pf = vf.getScalar().zero()
         
-    J = linr(vf.flowDict, complexType=complexType)
-    jcbn(vf, Lmat=J)
-    F = (vf.residuals(pField=pf).appendField( vf.div() ) )[0,:L1].flatten()
+    J = linr(vf.flowDict, complexType=complexType, sigma1=sigma1)
+    jcbn(vf, Lmat=J,sigma1=sigma1)
+    F = (vf.residuals(pField=pf).appendField( vf.div() ) ).flatten()
     
     # Some simple checks
     assert (F.ndim == 1) and (J.ndim == 2)
-    assert (J.shape[0] == L1*vf.nz*N4) and (F.size == L1*vf.nz*N4)
+    assert (J.shape[0] == vf.nx*vf.nz*N4) and (F.size == vf.nx*vf.nz*N4)
     
     
     # Imposing boundary conditions
@@ -440,7 +440,7 @@ def makeSystem(vf=None,pf=None, complexType=np.complex):
     #       of the governing equations at the walls
     # Removing wall-equations if rect is False:
     # I don't have to remove wall-equations for divergence
-    BCrows = N4*np.arange(L1*vf.nz).reshape((L1*vf.nz,1)) + np.array([0,N-1,N,2*N-1,2*N,3*N-1]).reshape((1,6))
+    BCrows = N4*np.arange(vf.nx*vf.nz).reshape((vf.nx*vf.nz,1)) + np.array([0,N-1,N,2*N-1,2*N,3*N-1]).reshape((1,6))
     BCrows = BCrows.flatten()
 
     jacobianBC = J
@@ -499,7 +499,8 @@ def lineSearch(normFun,x0,dx,arr=None):
 
 
 
-def iterate(vf=None, pf=None,iterMax= 6, tol=5.0e-10,rcond=1.0e-07,complexType=np.complex,doLineSearch=True):
+def iterate(vf=None, pf=None,iterMax= 6, tol=5.0e-10,rcond=1.0e-07,complexType=np.complex,doLineSearch=True, sigma1=False):
+    sigma1=False
     if pf is None: pf = vf.getScalar().zero()
     resnormFun = lambda x: x.residuals().appendField(x.div()).norm() 
 
@@ -539,10 +540,11 @@ def iterate(vf=None, pf=None,iterMax= 6, tol=5.0e-10,rcond=1.0e-07,complexType=n
        
        
         dxff = x.zero()
-        dxff[0,:x.nx//2+1] = dx.reshape((x.nx//2+1,x.nz,4,x.N))
-        dxff[0,x.nx//2+1:] = np.conj(dxff[0, x.nx//2-1::-1, ::-1])
+        #dxff[0,:x.nx//2+1] = dx.reshape((x.nx//2+1,x.nz,4,x.N))
+        #dxff[0,x.nx//2+1:] = np.conj(dxff[0, x.nx//2-1::-1, ::-1])
+        dxff[0] = dx.reshape((x.nx, x.nz, 4, x.N))
 
-        dxff[0] = 0.5*(dxff[0] + np.conj(dxff[0,::-1,::-1]))
+        #dxff[0] = 0.5*(dxff[0] + np.conj(dxff[0,::-1,::-1]))
         dxff[0,:,:,:3,[0,-1]] = 0.
 
         if doLineSearch:
@@ -814,8 +816,10 @@ def testExactRibletModule(L=4,M=7,N=35,epsArr=np.array([0.,0.05,0.02,0.03]),sigm
 
 
     # Lmat = np.zeros(( (x.nx//2 +1) * x.nz *4*N , (x.nx//2 +1) * x.nz *4*N ), dtype=np.complex)
-    Lmat[:] = 0.
+    Lmat0 = Lmat.copy()
+    #Lmat[:] = 0.
     jcbn(vf,Lmat=Lmat,sigma1=sigma1)
+    Lmat = Lmat-Lmat0
 
     if sigma1:
         xm_ = x.copyArray()[0,:,:x.nz//2+1].flatten()
@@ -831,11 +835,13 @@ def testExactRibletModule(L=4,M=7,N=35,epsArr=np.array([0.,0.05,0.02,0.03]),sigm
         print('sigma1 invariance norm of x is', (x - x.reflectZ().shiftPhase(phiX=np.pi) ).norm())
     else:
         NLtestResult = np.linalg.norm(NLterm - NLtermClass.flatten()) <= tol
-
+    
+    if sigma1: nz1 = vf.nz//2 + 1
+    else: nz1 = vf.nz
     if not linTestResult :
-        print('Residual norm for linear is:',np.linalg.norm(linTerm - linTermClass[0,:x.nx//2+1].flatten()))
+        print('Residual norm for linear is:',np.linalg.norm(linTerm - linTermClass[0,:,:nz1].flatten()))
     if not  NLtestResult:
-        print('Residual norm for non-linear is:',np.linalg.norm(NLterm - NLtermClass[0,:x.nx//2+1].flatten()))
+        print('Residual norm for non-linear is:',np.linalg.norm(NLterm - NLtermClass[0,:,:nz1].flatten()))
 
     if linTestResult and NLtestResult:
         print("Success for both tests!")
