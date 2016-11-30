@@ -404,7 +404,7 @@ def _residual(x):
     return (x.slice(nd=[0,1,2]).residuals(pField=x.getScalar(nd=3)).appendField( x.slice(nd=[0,1,2]).div() ) )
 
 
-def makeSystem(vf=None,pf=None, complexType=np.complex):
+def makeSystem(vf=None,pf=None, **kwargs):
     """
     Create functions for residual and Jacobian matrices, Boundary conditions and symmetries are imposed here. 
     The output functions
@@ -419,28 +419,26 @@ def makeSystem(vf=None,pf=None, complexType=np.complex):
     sigma1=False 
     N = vf.N; N4 = 4*N
     L = vf.nx//2; M = vf.nz//2
-    L1 = L+1; nz=vf.nz
+    sigma1 = kwargs['sigma1']; complexType = np.complex 
+    if sigma1:  
+        nz1 = M+1
+    else: nz1 = vf.nz
+
+
     if pf is None:
         pf = vf.getScalar().zero()
         
-    J = linr(vf.flowDict, complexType=complexType, sigma1=sigma1)
-    jcbn(vf, Lmat=J,sigma1=sigma1)
-    F = (vf.residuals(pField=pf).appendField( vf.div() ) ).flatten()
+    J = linr(vf.flowDict, complexType=complexType, sigma1=sigma1)  # Get Lmat
+    jcbn(vf, Lmat=J, sigma1=sigma1)    # Add non-linear jacobian to Lmat
+    F = (vf.residuals(pField=pf).appendField( vf.div() ) )[0,:,:nz1].flatten() 
+
+
     
     # Some simple checks
     assert (F.ndim == 1) and (J.ndim == 2)
-    assert (J.shape[0] == vf.nx*vf.nz*N4) and (F.size == vf.nx*vf.nz*N4)
+    assert (J.shape[0] == vf.nx*nz1*N4) and (F.size == vf.nx*nz1*N4)
     
-    
-    # Imposing boundary conditions
-    #   Unlike my MATLAB code, I impose all BCs at the end of the jacobian matrix
-    #   So, if rect is True, the top rows of jacobian and residual remain unchanged
-    #       they just have extra rows at the end
-    #   If rect is False, I still add rows for BCs at the end, but I also remove the rows
-    #       of the governing equations at the walls
-    # Removing wall-equations if rect is False:
-    # I don't have to remove wall-equations for divergence
-    BCrows = N4*np.arange(vf.nx*vf.nz).reshape((vf.nx*vf.nz,1)) + np.array([0,N-1,N,2*N-1,2*N,3*N-1]).reshape((1,6))
+    BCrows = N4*np.arange(vf.nx*nz1).reshape((vf.nx*nz1,1)) + np.array([0,N-1,N,2*N-1,2*N,3*N-1]).reshape((1,6))
     BCrows = BCrows.flatten()
 
     jacobianBC = J
@@ -449,6 +447,7 @@ def makeSystem(vf=None,pf=None, complexType=np.complex):
     jacobianBC[BCrows,BCrows] = 1.
     # Equations on boundary nodes now read 1*u_{lm} = .. , 1*v_{lm} = .., 1*w_{lm} = ..
     # The RHS for the equations is set in residualBC below
+    F[BCrows] = 0.
 
     return jacobianBC, F 
 
@@ -499,8 +498,8 @@ def lineSearch(normFun,x0,dx,arr=None):
 
 
 
-def iterate(vf=None, pf=None,iterMax= 6, tol=5.0e-10,rcond=1.0e-07,complexType=np.complex,doLineSearch=True, sigma1=False):
-    sigma1=False
+def iterate(vf=None, pf=None,iterMax= 6, tol=5.0e-10,rcond=1.0e-07,doLineSearch=True,sigma1=True):
+    complexType=np.complex
     if pf is None: pf = vf.getScalar().zero()
     resnormFun = lambda x: x.residuals().appendField(x.div()).norm() 
 
@@ -527,7 +526,7 @@ def iterate(vf=None, pf=None,iterMax= 6, tol=5.0e-10,rcond=1.0e-07,complexType=n
         vf = x.slice(nd=[0,1,2]); pf = x.slice(nd=3)
 
 
-        J, F = makeSystem(vf=vf, pf=pf,complexType=complexType)
+        J, F = makeSystem(vf=vf, pf=pf,sigma1=sigma1)
                 
         sys.stdout.flush()
         
@@ -540,12 +539,27 @@ def iterate(vf=None, pf=None,iterMax= 6, tol=5.0e-10,rcond=1.0e-07,complexType=n
        
        
         dxff = x.zero()
-        #dxff[0,:x.nx//2+1] = dx.reshape((x.nx//2+1,x.nz,4,x.N))
-        #dxff[0,x.nx//2+1:] = np.conj(dxff[0, x.nx//2-1::-1, ::-1])
-        dxff[0] = dx.reshape((x.nx, x.nz, 4, x.N))
-
-        #dxff[0] = 0.5*(dxff[0] + np.conj(dxff[0,::-1,::-1]))
-        dxff[0,:,:,:3,[0,-1]] = 0.
+        if sigma1:
+            M = x.flowDict['M']; L = x.flowDict['L']
+            # dx only has m<= 0 modes
+            dx = dx.reshape((x.nx,M+1,4,x.N))
+            dxff[0,:,:M+1] =  dx[:] # Assigning modes -M to 0 (inclusive)
+            
+            # Some manipulation before assigning modes m=1 to M
+            # Idea here is to get u_{l,m} = (-1)^l u_{l,-m}, with factor (-1)^{l+1} for w
+            dxTemp = dx[:,:M]  # Modes -M to -1
+            dxTemp = dxTemp[:,::-1] # Reorder as 1 to M
+            dxTemp[:,:,2] *= -1.    # Multiply w field with -1
+            lArr = np.arange(-L, L+1).reshape(( x.nx, 1,1,1))
+            dxTemp = ((-1.)**lArr)  * dxTemp
+            
+            dxff[0,:,M+1:] += dxTemp[:]
+        else:
+            dxff[0] = dx.reshape((x.nx,x.nz,4,x.N))
+        
+        # Ensuring fields are real-valued
+        dxff[0] = 0.5*(dxff[0] + np.conj(dxff[0,::-1,::-1]))
+        dxff[0,:,:,:3,[0,-1]] = 0.   # Correction field should not change velocity BCs, for Couette or channel flow
 
         if doLineSearch:
             x = lineSearch(resnormFun, x, dxff)
