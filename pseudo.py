@@ -38,6 +38,7 @@
 ###--------------------------------------------------------
 
 import scipy as sp 
+import numpy as np
 from operator import mul
 from scipy.linalg import toeplitz
 from scipy.fftpack import ifft
@@ -137,9 +138,9 @@ def clencurt(n1):
     w = 2
   else:
     n = n1 - 1
-    C = sp.zeros((n1,2))
+    C = sp.zeros((n1,2),dtype=np.float)
     k = 2*(1+sp.arange(int(sp.floor(n/2))))
-    C[::2,0] = 2/sp.hstack((1, 1-k*k))
+    C[::2,0] = 2/sp.hstack((1., 1.-k*k))
     C[1,1] = -n
     V = sp.vstack((C,sp.flipud(C[1:n,:])))
     F = sp.real(ifft(V, n=None, axis=0))

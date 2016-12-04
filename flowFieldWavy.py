@@ -747,7 +747,7 @@ class flowFieldRiblet(flowFieldWavy):
         return partialz2
     
 
-    def saveh5fName(self,fNamePrefix='ribEq1',prefix='solutions/ribEq/'):
+    def saveh5fName(self,fNamePrefix='ribEq1',prefix='./'):
         fName = 'L'+str(self.flowDict['L'])+'M'+str(self.flowDict['M'])+'N'+str(self.flowDict['N'])
         if 'epsArr' in self.flowDict:
             epsArr = self.flowDict['epsArr']
