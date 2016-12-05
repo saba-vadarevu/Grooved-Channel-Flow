@@ -17,7 +17,7 @@ def arr2ff(arr=None,flowDict=None):
     return ff
 
 def setSymms(xTemp):
-    """Set velocities at walls to zero, and ensure that the field is real valued"""
+    """Set velocities at walls to zero"""
     x = xTemp.copy()
     x.view4d()[:,:,:,:3,[0,-1]] = 0.
     if x.flowDict['isPois']== 0:
@@ -26,6 +26,9 @@ def setSymms(xTemp):
     #vf[0,:,:vf.nz//2] = 0.5*(vf[0,:,:vf.nz//2]+ vf[0,:,:vf.nz//2:-1].conj())
     #vf[0,:,:vf.nz//2:-1] = vf[0,:,:vf.nz//2].conj()
     return x 
+
+
+
 
 def dict2ff(flowDict):
     """ Returns a velocity flowField with linear/quadratic profile depending on 'isPois'"""
@@ -498,7 +501,7 @@ def lineSearch(normFun,x0,dx,arr=None):
 
 
 
-def iterate(vf=None, pf=None,iterMax= 6, tol=5.0e-10,rcond=1.0e-07,doLineSearch=True,sigma1=True):
+def iterate(vf=None, pf=None,iterMax= 6, tol=5.0e-10,rcond=1.0e-06,doLineSearch=True,sigma1=True,sigma2=False,sigma3=False):
     complexType=np.complex
     if pf is None: pf = vf.getScalar().zero()
     resnormFun = lambda x: x.residuals().appendField(x.div()).norm() 
@@ -506,7 +509,9 @@ def iterate(vf=None, pf=None,iterMax= 6, tol=5.0e-10,rcond=1.0e-07,doLineSearch=
     x = vf.appendField(pf)
 
     x = setSymms(x)   # Nothing fancy here. Just setting velocities at wall to zero
-    # And ensuring field is real-valued
+    x.imposeSymms(sigma1=sigma1, sigma2=sigma2, sigma3=sigma3)
+    # Impose real-valuedness (by default), and sigma1, sigma2, sigma3 if supplied as kwargs 
+
 
     fnormArr=[]
     flg = 0
@@ -532,9 +537,7 @@ def iterate(vf=None, pf=None,iterMax= 6, tol=5.0e-10,rcond=1.0e-07,doLineSearch=
         
         dx, linNorm, jRank,sVals = np.linalg.lstsq(J,-F,rcond=rcond)
         linNorm = np.linalg.norm(np.dot(J,dx) + F)
-        print("Jacobian inversion success with residual norm ", linNorm)
-        if linNorm > linTol:
-            print('Least squares problem returned residual norm:',linNorm,' which is greater than tolerance:',linTol)
+        print('Jacobian inversion returned with residual norm:',linNorm)
             
        
        
@@ -557,19 +560,21 @@ def iterate(vf=None, pf=None,iterMax= 6, tol=5.0e-10,rcond=1.0e-07,doLineSearch=
         else:
             dxff[0] = dx.reshape((x.nx,x.nz,4,x.N))
         
-        # Ensuring fields are real-valued
-        dxff[0] = 0.5*(dxff[0] + np.conj(dxff[0,::-1,::-1]))
+        # Ensuring correction fields are real-valued and obey the required symmetries
+        # dxff[0] = 0.5*(dxff[0] + np.conj(dxff[0,::-1,::-1]))
+        dxff.imposeSymms(sigma1=sigma1, sigma2=sigma2, sigma3=sigma3)
         dxff[0,:,:,:3,[0,-1]] = 0.   # Correction field should not change velocity BCs, for Couette or channel flow
 
         if doLineSearch:
             x = lineSearch(resnormFun, x, dxff)
         else:
             x += dxff
-        print("residual norm before setSymms:",resnormFun(x))
-        x = setSymms(x)
+        
+        x.imposeSymms(sigma1=sigma1, sigma2=sigma2, sigma3=sigma3)
+        
 
         fnorm = resnormFun(x)
-        print('Residual norm after setSymms in %d th iteration is %.3g'%(n+1,fnorm))
+        print('Residual norm after %d th iteration is %.3g'%(n+1,fnorm))
         sys.stdout.flush()
         
         fnormArr.append(fnorm)

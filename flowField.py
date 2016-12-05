@@ -1200,22 +1200,76 @@ class flowField(np.ndarray):
 
 
         # Check sigma_1= T_{Lx/2,0} F_0 : [u,v,w](x,y,z) -> [u,v,-w](x+Lx/2, y, -z) 
-        if (self.view4d() - self.reflectZ().shiftPhase(phiX=np.pi) ).norm() <= tol:
+        sig1Tol = (self.view4d() - self.reflectZ().shiftPhase(phiX=np.pi) ).norm()
+        if sig1Tol <= tol:
             symmsDict['sigma1'] = True
 
         # Check sigma_2= T_{Lx/2,Lz/2} R_0 : [u,v,w](x,y,z) -> [-u,-v,w](-x+Lx/2, -y, z+Lz/2) 
-        if (self.view4d() - self.rotateZ().shiftPhase(phiX=np.pi,phiZ=np.pi) ).norm() <= tol:
+        sig2Tol = (self.view4d() - self.rotateZ().shiftPhase(phiX=np.pi,phiZ=np.pi) ).norm()
+        if sig2Tol <= tol:
             symmsDict['sigma2'] = True
 
         # Check sigma_3= T_{0,Lz/2} P_0 : [u,v,w](x,y,z) -> [-u,-v,-w](-x,-y, -z+Lz/2) 
-        if (self.view4d() - self.pointwiseInvert().shiftPhase(phiZ=np.pi) ).norm() <= tol:
+        sig3Tol = (self.view4d() - self.pointwiseInvert().shiftPhase(phiZ=np.pi) ).norm()
+        if sig3Tol <= tol:
             symmsDict['sigma3'] = True
+
+        symmsDict.update({'sigma1Tol':sig1Tol,'sigma2Tol':sig2Tol, 'sigma3Tol':sig3Tol,'tol':tol})
        
         if moreSymms:
             print("Checking for symmetries other than sigma1, sigma2, sigma3 isn't available yet.")
         
         return symmsDict
 
+
+    def imposeSymms(self, realValued=True, sigma1=True, sigma2=False,sigma3=False):
+        """ For a given flowField, modify Fourier modes such that symmetries are satisfied.
+        Inputs:
+            self: flowField instance
+            **realValued (True)
+            **sigma1 (True)
+            **sigma2 (False)
+            **sigma3 (False)
+            Refer to documentation for description of sigma1, sigma2, sigma3. 
+        Outputs:
+            Nonetype (flowField modified in-place)
+            """
+        
+        if realValued:
+            self[:] = 0.5*( self + np.conjugate(self[:,::-1,::-1]))
+
+        L = self.nx//2; M = self.nz//2
+        lArr = np.arange(-L, L+1).reshape((1,self.nx,1,1,1))
+        mArr = np.arange(-M, M+1).reshape((1,1,self.nz,1,1))
+
+        if sigma1:
+            # u_{l,m} = (-1)^l*  u_{l,-m},  v_{l,m} = (-1)^l*  v_{l,-m}
+            # w_{l,m} = (-1)^l* -w_{l,-m},  p_{l,m} = (-1)^l*  p_{l,-m}
+            compArr = np.array([1., 1., -1., 1.]).reshape((1,1,1,4,1))
+            self[:] = 0.5*( self + ( (-1.)**lArr) *compArr*  self[:, :, ::-1] )
+            
+        if sigma2:
+            # u_{l,m} = (-1)^(l+m)* -u_{-l,m}(-y),  v_{l,m} = (-1)^(l+m)* -v_{-l,m}(-y)
+            # w_{l,m} = (-1)^(l+m)*  w_{-l,m}(-y),  p_{l,m} = (-1)^(l+m)*  p_{-l,m}(-y)
+            compArr = np.array([-1., -1., 1., 1.]).reshape((1,1,1,4,1))
+            self[:] = 0.5*( self + ( (-1.)**(lArr+mArr)) * compArr *  self[:, ::-1, :, :, ::-1] )
+
+        if sigma3:
+            # u_{l,m} = (-1)^(m)* -u_{-l,-m}(-y),  v_{l,m} = (-1)^(m)* -v_{-l,-m}(-y)
+            # w_{l,m} = (-1)^(m)* -w_{-l,-m}(-y),  p_{l,m} = (-1)^(m)*  p_{-l,-m}(-y)
+            compArr = np.array([-1., -1., -1., 1.]).reshape((1,1,1,4,1))
+            self[:] = 0.5*( self + ( (-1.)**(mArr)) * compArr *  self[:, ::-1, ::-1, :, ::-1] )
+
+        symmsDict = self.checkSymms(tol=1.0e-12)
+        if sigma1:
+            if not symmsDict['sigma1']: warn("sigma1 was not properly imposed")
+        if sigma2:
+            if not symmsDict['sigma2']: warn("sigma2 was not properly imposed")
+        if sigma3:
+            if not symmsDict['sigma3']: warn("sigma3 was not properly imposed")
+
+
+        return
 
 
 def _convolve(ff1,ff2):
