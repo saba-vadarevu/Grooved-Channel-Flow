@@ -41,7 +41,7 @@ def dict2ff(flowDict):
     return vf
 
 
-def linr(flowDict,complexType = np.complex, sigma1 = True): 
+def linr(flowDict,complexType = np.complex, sigma1 = True, sigma2=False): 
     """Returns matrix representing the linear operator for the equilibria/TWS for riblet case
     Linear operator for exact solutions isn't very different from that for laminar, 
         all inter-modal interaction remains the same for a fixed 'l'. 
@@ -144,8 +144,11 @@ def linr(flowDict,complexType = np.complex, sigma1 = True):
     nx = 2*L+1
     # For exact solutions, we have L!= 0
     #   So, I take L0wavy, and add i.l.alpha or -l**2.a**2 as appropriate
-    Lmat = np.zeros((nx*nz1*N4,nx*nz1*N4),dtype=complexType)
+    if sigma2: L1 = L+1
+    else: L1 = nx
+    Lmat = np.zeros((L1*nz1*N4,L1*nz1*N4),dtype=complexType)
     # If imposing sigma1, build for only m <= 0 
+    # If imposing sigma2, build for only l <= 0
 
 
     mat1 = np.zeros((nz1*N4,nz1*N4),dtype=complexType); mat2 = mat1.copy()
@@ -202,7 +205,7 @@ def linr(flowDict,complexType = np.complex, sigma1 = True):
         # Now we're ready to multiply with (-1)^l and add to Lmat
         
 
-    for lp in range(nx):
+    for lp in range(L1):
         l = lp-L
 
         # Using s1 instead of nz*N4. If sigma1 is False, there is no difference
@@ -803,20 +806,22 @@ def averagedU(vf,nd=0, zArr = None, ny = 50):
     
 
 
-def testExactRibletModule(L=4,M=7,N=35,epsArr=np.array([0.,0.05,0.02,0.03]),sigma1=True,complexType=np.complex):
+def testExactRibletModule(L=4,M=7,N=35,epsArr=np.array([0.,0.05,0.02,0.03]),sigma1=True,sigma2=False,complexType=np.complex):
     vf = h52ff('testFields/eq1.h5')
     pf = h52ff('testFields/pres_eq1.h5',pres=True)
     vf = vf.slice(L=L,M=M,N=N); pf = pf.slice(L=L,M=M,N=N)
     vf.flowDict.update({'epsArr':epsArr}); pf.flowDict.update({'epsArr':epsArr})
     
-    Lmat = linr(vf.flowDict,complexType=complexType,sigma1=sigma1)
+    Lmat = linr(vf.flowDict,complexType=complexType,sigma1=sigma1,sigma2=sigma2)
     x = vf.appendField(pf)
     
+    xArr = x.copyArray()[0]
     if sigma1:
-        xm_ = x.copyArray()[0,:,:x.nz//2+1].flatten()
-        linTerm = np.dot(Lmat, xm_)
-    else:
-        linTerm = np.dot(Lmat, x.flatten())
+        xArr = xArr[:,:x.nz//2+1]
+    if sigma2:
+        xArr = xArr[:x.nx//2+1]
+    xm_ = xArr.flatten()
+    linTerm = np.dot(Lmat, xm_)
 
 
     nex = 5
@@ -827,18 +832,29 @@ def testExactRibletModule(L=4,M=7,N=35,epsArr=np.array([0.,0.05,0.02,0.03]),sigm
 
     linTermClass = (vf1.laplacian()/(-1.*vf1.flowDict['Re']) + pf1.grad()).appendField(vf1.div())
     linTermClass = linTermClass.slice(L=vf.nx//2, M=vf.nz//2)
+    resArr = linTermClass.copyArray()[0]
     if sigma1:
-        linTestResult = chebnorm(linTerm - linTermClass.copyArray()[0,:,:x.nz//2+1].flatten(), x.N) <= tol
+        resArr = resArr[:,:x.nz//2+1]
+    if sigma2:
+        resArr = resArr[:x.nx//2+1]
+    resm_ = resArr.flatten()
+    
+    linTestResult = chebnorm(linTerm - resm_, x.N) <= tol
+    if sigma1:
         print('sigma1 invariance norm of x is', (x - x.reflectZ().shiftPhase(phiX=np.pi) ).norm())
-    else:
-        linTestResult = chebnorm(linTerm - linTermClass.copyArray().flatten(), x.N) <= tol
+    if sigma2:
+        print('sigma2 invariance norm of x is', (x - x.rotateZ().shiftPhase(phiX=np.pi, phiZ=np.pi) ).norm())
 
 
-    # Lmat = np.zeros(( (x.nx//2 +1) * x.nz *4*N , (x.nx//2 +1) * x.nz *4*N ), dtype=np.complex)
-    Lmat0 = Lmat.copy()
+    if sigma1:
+        M1 = x.nz//2 + 1
+    else: 
+        M1 = x.nz
+    Lmat = np.zeros(( x.nx*M1*4*N , x.nx*M1 *4*N ), dtype=np.complex)
+    #Lmat0 = Lmat.copy()
     #Lmat[:] = 0.
     jcbn(vf,Lmat=Lmat,sigma1=sigma1)
-    Lmat = Lmat-Lmat0
+    #Lmat = Lmat-Lmat0
 
     if sigma1:
         xm_ = x.copyArray()[0,:,:x.nz//2+1].flatten()
