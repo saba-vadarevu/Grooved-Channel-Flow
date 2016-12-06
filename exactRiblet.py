@@ -222,15 +222,16 @@ def linr(flowDict,complexType = np.complex, sigma1 = True, sigma2=False):
 
 
 
-def jcbn(vf,Lmat=None,sigma1=True):
+def jcbn(vf,Lmat=None,sigma1=True,sigma2=False):
     if Lmat is None:
-        warn('The Jacobian is added in-place to Lmat. Always supply Lmat. Returning.....')
-        return
+        raise RuntimeError('The Jacobian is added in-place to Lmat. Always supply Lmat. Returning.....')
 
-    if sigma1:
-        nz1 = vf.nz//2 + 1
-    else:
-        nz1 = vf.nz
+    if sigma1: nz1 = vf.nz//2 + 1
+    else: nz1 = vf.nz
+
+    if sigma2: nx1 = vf.nx//2 + 1
+    else: nx1 = vf.nx
+
 
     a = vf.flowDict['alpha']; b = vf.flowDict['beta']
     epsArr = vf.flowDict['epsArr']
@@ -251,33 +252,26 @@ def jcbn(vf,Lmat=None,sigma1=True):
 
     # Index of the first row/column of the block for any wavenumber vector (l,m)
     iFun = lambda l,m: (l+L)*(nz1*4*N) + (m+M)*4*N
+    iFun0 = lambda l,m : (l+L)*vf.nz*4*N + (m+M)*4*N 
+    # When sigma1 is imposed, I build a G for all l',m' (including l'>0,m'>0). 
+    #   I need iFun0 for this case
 
     Gmat = Lmat
-    assert (Gmat.shape[0] == vf.nx*nz1*4*N) and (Gmat.shape[1] == vf.nx*nz1*4*N)
+    assert (Gmat.shape[0] == nx1*nz1*4*N) and (Gmat.shape[1] == nx1*nz1*4*N)
 
     # I will be using the functions np.diag() and np.dot() quite often, so,
     diag = np.diag; dot = np.dot
 
-    # I am deviating from my earlier implementation of defining G to revert to
-    #   the implementation used for the laminar case
-    # The two ways to do it is this: 
-    #   1) Go through each row-column-block of the matrix and figure out which 
+    # To calculate Gmat:
+    #   Go through each row-column-block of the matrix and figure out which 
     #           u_{l,m} goes there (along with factors for derivatives)
-    #   2) Loop over (l,m), get the u_{l,m} and d_y(u_{l,m})
-    #       Then, go through row-blocks and assign this u_lm to the appropriate column
-    # The first approach is the simpler one. The second is a bit more complex, but
-    #   involves one loop fewer. I'm going with the second one, but not for the performance
-    # Since I am only building G for non-positive 'l', it's easier if I go with the second
-
     # This is the notation I shall use:
-    # l', m' (written in code as lp, mp) represent the mode numbers of the modes that I
-    #   first loop through. That is, I loop over l',m' and populate G with u_{l',m'}
     # l , m represent the mode for which the equation is written
     #   I use phi_lm to represent the convection term in the NSE for mode (l,m)
     #   phi^1 is streamwise convection term: phi^1 = u d_x u + v d_y u + w d_z u
     #   phi^2 is wall-normal, phi^3 is spanwise
     # So, the wave-triads go as { (l', m'), (l,m), (l-l',m-m')} (for terms not involving wall-effects)
-    #   u_{l',m'} is populated in row-block corresponding to phi_{l,m} in column-block for u_{l-l',m-m'}
+    #   u_{l-l',m-m'} is populated in row-block corresponding to phi_{l,m} in column-block for u_{l',m'}
 
     # Strictly speaking, what I'm building is not the Jacobian G
     # I'm building G such that N(\chi) = 0.5 * G * \chi, where \chi is the state-vector
@@ -287,10 +281,12 @@ def jcbn(vf,Lmat=None,sigma1=True):
     # Final piece of notation: 
     ia = 1.j*a; ib = 1.j*b
 
-    if sigma1:
-        M1 = 1
-    else:
-        M1 = M+1
+    if sigma1: M1 = 1
+    else: M1 = M+1
+    if sigma2: L1 = 1
+    else: L1 = L+1
+    # If sigma1, write equations only until m < 1, else, until m<M+1
+    # If sigma2, write equations only until l < 1, else, until l<L+1
 
         
     # The convection term has this form:
@@ -302,26 +298,22 @@ def jcbn(vf,Lmat=None,sigma1=True):
     #    G is folded and multiplied with (-1)**lp before being assigned to the
     #        corresponding rows and columns in Gmat
     # Otherwise, G is added as is
-    G = np.zeros((4*N, vf.nz*4*N), dtype=np.complex)
+    G = np.zeros((4*N, vf.nx*vf.nz*4*N), dtype=np.complex)
 
 
-    for l in range(-L,L+1):
+    for l in range(-L,L1):
         for m in range(-M,M1):
-            # Index of first row in the block for equations for wavenumbers (l,m)
-            rInd = iFun(l,m)
             # l1,m2 are the wavenumbers in phi^j_{lm}
+            G[:] = 0.    # Getting rid of G from previous 
+            rInd = 0     # We're only writing equations for one l,m
+            # G contains the part of the Jacobian that multiplies all modes  
+            #    in the equations for (l,m)
+            # I will define this without assuming symmetries
+            # Before adding to Gmat, I will fold G on itself according to sigma1, sigma2
 
             for lp in range(-L,L+1):
-                G[:] = 0.    # Getting rid of G from previous 
-                rInd = 0     # We're only writing equations for one l,m, lp
-                # G contains the part of the Jacobian that multiplies the mode (lp,:)
-                #    in the equations for (l,m)
-                # I will define this without assuming symmetries
-                # When adding to Gmat, I will fold G on itself
-                
                 for mp in range(-M,M+1):
-                    #cInd = iFun(lp,mp)
-                    cInd = iFun(-L,mp)  # Because I'm writing G for only one 'l'
+                    cInd = iFun0(lp,mp)
                     if (-L <= (l-lp) <= L):
                         li = l-lp+L # Array index for streamwise wavenumber l-lp
 
@@ -373,38 +365,42 @@ def jcbn(vf,Lmat=None,sigma1=True):
                                 # phi^3_{l,m}: factors of terms with w_{lp,mp}
                                 G[ rInd+2*N : rInd+3*N , cInd+2*N : cInd+3*N ] += Tz[q0-q]* w[li,mi].reshape((N,1)) * D \
                                         +Tz[q0-q]* diag(wy[li,mi]) 
-                # Now, G is ready to be folded if sigma1 holds
+            # Now, G is ready to be folded if sigma1 holds
+            if sigma1 or sigma2:
+                Gnew = G.reshape((4*N, vf.nx,vf.nz,4,N))
+                lArr = np.arange(-L,L+1).reshape((1,vf.nx, 1,1,1))
+                mArr = np.arange(-M,M+1).reshape((1,1, vf.nz,1,1))
                 if sigma1:
-                    if False:
-                        Gtemp = np.zeros((4*N, M+1, 4*N), dtype=Gmat.dtype)
-                        Gnew = G.reshape((4*N, vf.nz, 4,N))
-                        Gnew[:, M:,2] = -1.* Gnew[:, M:, 2]   # w-factors need to be multiplied with an extra -1
-                        # Because sigma1 goes u_{l,m} = (-1)^l  u_{l,-m} (same for v and p)
-                        #               but   w_{l,m} = (-1)^{l+1} w_{l,-m}
-                        Gnew = Gnew.reshape((4*N, vf.nz, 4*N))
+                    compArr = np.array([1., 1., -1., 1.]).reshape((1,1,1,4,1))
+                    Gtemp  = Gnew[:,:, :M+1]      # Copying G as is for m <= 0
+                    Gtemp[:, :, :M] += ((-1.)**lArr) * compArr * Gnew[:,:,:M:-1]
+                    # For m>0 in G (or Gnew), array is reordered so m lines up with -m,
+                    #   u,v,p are multiplied by 1, w by -1,
+                    #    and columns for 'l' are multiplied with -1^l
+                else: Gtemp = Gnew
+                if sigma2:
+                    compArr = np.array([-1., -1., 1., 1.]).reshape((1,1,1,4,1))
+                    mArr = mArr[:,:,:nz1]; lArr = lArr[:,:L]
+                    Gtemp[:, :L] += (-1.)**(lArr+mArr) * compArr * Gtemp[:,:L:-1,:,:,::-1]
+                    Gtemp = Gtemp[:,:L+1]
+                    # l =0 mode is unchanged
+                    # l < 0 modes are already part of Gtemp
+                    # Take l>0 in Gtemp, flip y-part (last index) so that +y lines up with -y,
+                    #   flip l>0 modes so l lines up with -l,
+                    #   multiply u,v with -1, w,p with 1,
+                    #   multiply the whole thing with -1^(l+m)
+                    # and add the result to l<0 modes 
+                Gtemp = Gtemp.reshape((4*N, nx1*nz1*4*N))
+            else:
+                Gtemp = G
 
-                        Gtemp[:] = Gnew[:, :M+1]   # Factors of non-positive modes are assigned as are
-                        Gtemp[:,:M] += (-1.)**lp  * Gnew[:, :M:-1]   # Need to assign M to -M, (M-1) to -(M-1) and so on..
-                        # Reshaping to a matrix
-                        Gtemp = Gtemp.reshape((4*N, nz1*4*N))
-                        # And that's it. We're ready to add to Gmat
-                    else:
-                        Gtemp = G[:, nz1*4*N:].reshape((4*N, M, 4*N))
-                        Gtemp = Gtemp[:,::-1]
-                        Gtemp[:,:, 2*N:3*N] *= -1.
-                        Gtemp = Gtemp.reshape((4*N, M*4*N))
-                        
-                        
-                    
                 
-                cInd = iFun(lp, -M)
-                rInd = iFun(l,m)
-                Gmat[rInd: rInd+4*N, cInd: cInd+nz1*4*N] += G[:,:nz1*4*N]
-                if sigma1:
-                    Gmat[rInd: rInd+4*N, cInd: cInd+M*4*N] += (-1.)**lp * Gtemp
-
+            cInd = 0 # Because columns for all modes are filled at once
+            rInd = iFun(l,m)
+            Gmat[rInd: rInd+4*N, cInd: cInd+nx1*nz1*4*N] += Gtemp
 
     return  
+
 
 def _residual(x):
     return (x.slice(nd=[0,1,2]).residuals(pField=x.getScalar(nd=3)).appendField( x.slice(nd=[0,1,2]).div() ) )
@@ -807,12 +803,16 @@ def averagedU(vf,nd=0, zArr = None, ny = 50):
 
 
 def testExactRibletModule(L=4,M=7,N=35,epsArr=np.array([0.,0.05,0.02,0.03]),sigma1=True,sigma2=False,complexType=np.complex):
+    print('Testing for symmetries sigma1=%r and sigma2=%r to tolerance %.3g'%(sigma1,sigma2,tol))
     vf = h52ff('testFields/eq1.h5')
     pf = h52ff('testFields/pres_eq1.h5',pres=True)
     vf = vf.slice(L=L,M=M,N=N); pf = pf.slice(L=L,M=M,N=N)
     vf.flowDict.update({'epsArr':epsArr}); pf.flowDict.update({'epsArr':epsArr})
+    nex = 5 # Padding flowField with extra modes for anti-aliasing
+    vf1 = vf.slice(L=vf.nx//2+nex, M = vf.nz//2+nex)
+    pf1 = pf.slice(L=vf.nx//2+nex, M = vf.nz//2+nex)
     
-    Lmat = linr(vf.flowDict,complexType=complexType,sigma1=sigma1,sigma2=sigma2)
+    # Reducing state-vector if symmetries are imposed
     x = vf.appendField(pf)
     
     xArr = x.copyArray()[0]
@@ -821,58 +821,50 @@ def testExactRibletModule(L=4,M=7,N=35,epsArr=np.array([0.,0.05,0.02,0.03]),sigm
     if sigma2:
         xArr = xArr[:x.nx//2+1]
     xm_ = xArr.flatten()
+
+    
+    # Calculating linear matrix, and the product with state-vector
+    Lmat = linr(vf.flowDict,complexType=complexType,sigma1=sigma1,sigma2=sigma2)
     linTerm = np.dot(Lmat, xm_)
 
-
-    nex = 5
-
-    vf1 = vf.slice(L=vf.nx//2+nex, M = vf.nz//2+nex)
-    pf1 = pf.slice(L=vf.nx//2+nex, M = vf.nz//2+nex)
-    
-
+    # Calculating linear term from class methods
     linTermClass = (vf1.laplacian()/(-1.*vf1.flowDict['Re']) + pf1.grad()).appendField(vf1.div())
     linTermClass = linTermClass.slice(L=vf.nx//2, M=vf.nz//2)
-    resArr = linTermClass.copyArray()[0]
+
+
+    # Calculating non-linear matrix, and its product with the state-vector
+    Lmat0 = Lmat.copy()
+    jcbn(vf,Lmat=Lmat,sigma1=sigma1,sigma2=sigma2)
+    Lmat = Lmat-Lmat0
+    NLterm = 0.5*np.dot(Lmat, xm_)
+
+    # Calculating non-linear term from class methods
+    NLtermClassFine = vf1.convNL()
+    NLtermClass = NLtermClassFine.slice(L=vf.nx//2, M=vf.nz//2).appendField(pf.zero())
+
+
+    # Reducing terms from class methods so positive Fourier modes are discarded according to sigma1,sigma2
+    linResArr = linTermClass.copyArray()[0]
+    NLresArr = NLtermClass.copyArray()[0]
     if sigma1:
-        resArr = resArr[:,:x.nz//2+1]
+        linResArr = linResArr[:,:x.nz//2+1]
+        NLresArr  = NLresArr[: ,:x.nz//2+1]
     if sigma2:
-        resArr = resArr[:x.nx//2+1]
-    resm_ = resArr.flatten()
+        linResArr = linResArr[:x.nx//2+1]
+        NLresArr  = NLresArr[ :x.nx//2+1]
+    linResm_ = linResArr.flatten()
+    NLresm_  = NLresArr.flatten()
     
-    linTestResult = chebnorm(linTerm - resm_, x.N) <= tol
+    linResNorm = chebnorm(linTerm - linResm_ , x.N)
+    NLresNorm  = chebnorm(NLterm  - NLresm_  , x.N)
+
+    linTestResult = linResNorm <= tol
+    NLtestResult  = NLresNorm  <= tol
     if sigma1:
         print('sigma1 invariance norm of x is', (x - x.reflectZ().shiftPhase(phiX=np.pi) ).norm())
     if sigma2:
         print('sigma2 invariance norm of x is', (x - x.rotateZ().shiftPhase(phiX=np.pi, phiZ=np.pi) ).norm())
-
-
-    if sigma1:
-        M1 = x.nz//2 + 1
-    else: 
-        M1 = x.nz
-    Lmat = np.zeros(( x.nx*M1*4*N , x.nx*M1 *4*N ), dtype=np.complex)
-    #Lmat0 = Lmat.copy()
-    #Lmat[:] = 0.
-    jcbn(vf,Lmat=Lmat,sigma1=sigma1)
-    #Lmat = Lmat-Lmat0
-
-    if sigma1:
-        xm_ = x.copyArray()[0,:,:x.nz//2+1].flatten()
-        NLterm = 0.5*np.dot(Lmat, xm_)
-    else:
-        NLterm = 0.5*np.dot(Lmat, x.flatten())
-
-    NLtermClassFine = vf1.convNL()
-    NLtermClass = NLtermClassFine.slice(L=vf.nx//2, M=vf.nz//2).appendField(pf.zero())
-
-    if sigma1:
-        NLtestResult = chebnorm(NLterm - NLtermClass.copyArray()[0,:,:x.nz//2+1].flatten(), x.N) <= tol
-        print('sigma1 invariance norm of x is', (x - x.reflectZ().shiftPhase(phiX=np.pi) ).norm())
-    else:
-        NLtestResult = np.linalg.norm(NLterm - NLtermClass.flatten()) <= tol
     
-    if sigma1: nz1 = vf.nz//2 + 1
-    else: nz1 = vf.nz
     if not linTestResult :
         print('Residual norm for linear is:',np.linalg.norm(linTerm - linTermClass[0,:,:nz1].flatten()))
     if not  NLtestResult:
@@ -880,6 +872,9 @@ def testExactRibletModule(L=4,M=7,N=35,epsArr=np.array([0.,0.05,0.02,0.03]),sigm
 
     if linTestResult and NLtestResult:
         print("Success for both tests!")
+
+    print("*******************************")
+    sys.stdout.flush()
     
     return linTestResult, NLtestResult
 
