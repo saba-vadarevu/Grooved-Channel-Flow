@@ -543,7 +543,7 @@ class flowFieldWavy(flowField):
 
     def residuals(self,pField=None,**kwargs):
         """
-        Overloading the residuals function to slice fields as L+=2 and M+=2
+        Overloading the residuals function to slice fields as L+=5 and M+=5
         """
         L = self.flowDict['L']
         M = self.flowDict['M']

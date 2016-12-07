@@ -43,16 +43,12 @@ def dict2ff(flowDict):
 
 def linr(flowDict,complexType = np.complex, sigma1 = True, sigma2=False): 
     """Returns matrix representing the linear operator for the equilibria/TWS for riblet case
-    Linear operator for exact solutions isn't very different from that for laminar, 
-        all inter-modal interaction remains the same for a fixed 'l'. 
-    So, we use the function already written in the laminar.py module and modify it to suit
-        the current case
-    To use single floats, input argument complexType=np.complex64 
     Inputs:
         flowDict
         complexType (default: np.complex): Use np.complex64 for single precision
-        epsArr (default: [0.05,0.,0.]): 1-D numpy array containing amplitudes of surface-modes
                             First element is eps_1, and so on... 
+        sigma1 (bool: True): shift-reflect symmetry
+        sigma2 (bool: False): shift-rotate symmetry
     Outputs:
         Lmat:   Matrix representing linear terms for the complete state-vectors"""
     if 'epsArr' in flowDict:
@@ -144,11 +140,15 @@ def linr(flowDict,complexType = np.complex, sigma1 = True, sigma2=False):
     nx = 2*L+1
     # For exact solutions, we have L!= 0
     #   So, I take L0wavy, and add i.l.alpha or -l**2.a**2 as appropriate
-    if sigma2: L1 = L+1
-    else: L1 = nx
-    Lmat = np.zeros((L1*nz1*N4,L1*nz1*N4),dtype=complexType)
+    if sigma2: 
+        L1 = 1; nx1 = L+1
+    else: 
+        L1 = L+1; nx1 = 2*L+1 
+    Lmat = np.zeros((nx1*nz1*N4,nx1*nz1*N4),dtype=complexType)
     # If imposing sigma1, build for only m <= 0 
     # If imposing sigma2, build for only l <= 0
+    #    FOR SIGMA2, THIS IS ALL THAT NEEDS TO BE DONE. Just set L1 to 1 and nx1 to L+1,
+    #       No more folding needed. 
 
 
     mat1 = np.zeros((nz1*N4,nz1*N4),dtype=complexType); mat2 = mat1.copy()
@@ -205,8 +205,8 @@ def linr(flowDict,complexType = np.complex, sigma1 = True, sigma2=False):
         # Now we're ready to multiply with (-1)^l and add to Lmat
         
 
-    for lp in range(L1):
-        l = lp-L
+    for l in range(-L,L1):
+        lp = l+L
 
         # Using s1 instead of nz*N4. If sigma1 is False, there is no difference
         # Matrix from laminar case where l=0
@@ -217,6 +217,7 @@ def linr(flowDict,complexType = np.complex, sigma1 = True, sigma2=False):
         if sigma1:
             # Adding L0wavyTemp:
             Lmat[lp*s1:(lp+1)*s1, lp*s1: lp*s1+s2] += (-1.)**l  * L0wavyTemp
+    # As mentioned earlier, having L1 as 1 imposes sigma2. Nothing else needs to be done
 
     return Lmat
 
@@ -535,7 +536,7 @@ def iterate(vf=None, pf=None,iterMax= 6, tol=5.0e-10,rcond=1.0e-06,doLineSearch=
         sys.stdout.flush()
         
         dx, linNorm, jRank,sVals = np.linalg.lstsq(J,-F,rcond=rcond)
-        linNorm = np.linalg.norm(np.dot(J,dx) + F)
+        linNorm = chebnorm(np.dot(J,dx) + F, x.N)
         print('Jacobian inversion returned with residual norm:',linNorm)
             
        
