@@ -763,7 +763,7 @@ class flowFieldRiblet(flowFieldWavy):
         return fName , prefix
 
 
-    def saveh5(self,fNamePrefix='ribEq1',prefix='solutions/ribEq/'):
+    def saveh5(self,fNamePrefix='ribEq1',prefix='./'):
         """ Saves self to a hdf5 file
         Input:
             fNamePrefix (None): prefix to file name, such as LBeq1
