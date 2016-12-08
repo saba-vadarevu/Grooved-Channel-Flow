@@ -422,26 +422,24 @@ def makeSystem(vf=None,pf=None, **kwargs):
     sigma1=False 
     N = vf.N; N4 = 4*N
     L = vf.nx//2; M = vf.nz//2
-    sigma1 = kwargs['sigma1']; complexType = np.complex 
-    if sigma1:  
-        nz1 = M+1
-    else: nz1 = vf.nz
-
+    sigma1 = kwargs['sigma1']; complexType = np.complex ; sigma2 = kwargs['sigma2']
+    nz1 = vf.nz; nx1 = vf.nx
+    if sigma1: nz1 = M+1
+    if sigma2: nx1 = L+1
 
     if pf is None:
         pf = vf.getScalar().zero()
         
-    J = linr(vf.flowDict, complexType=complexType, sigma1=sigma1)  # Get Lmat
-    jcbn(vf, Lmat=J, sigma1=sigma1)    # Add non-linear jacobian to Lmat
-    F = (vf.residuals(pField=pf).appendField( vf.div() ) )[0,:,:nz1].flatten() 
-
+    J = linr(vf.flowDict, complexType=complexType, sigma1=sigma1,sigma2=sigma2)  # Get Lmat
+    jcbn(vf, Lmat=J, sigma1=sigma1,sigma2=sigma2)    # Add non-linear jacobian to Lmat
+    F = (vf.residuals(pField=pf).appendField( vf.div() ) )[0,:nx1,:nz1].flatten() 
 
     
     # Some simple checks
     assert (F.ndim == 1) and (J.ndim == 2)
-    assert (J.shape[0] == vf.nx*nz1*N4) and (F.size == vf.nx*nz1*N4)
+    assert (J.shape[0] == nx1*nz1*N4) and (F.size == nx1*nz1*N4)
     
-    BCrows = N4*np.arange(vf.nx*nz1).reshape((vf.nx*nz1,1)) + np.array([0,N-1,N,2*N-1,2*N,3*N-1]).reshape((1,6))
+    BCrows = N4*np.arange(nx1*nz1).reshape((nx1*nz1,1)) + np.array([0,N-1,N,2*N-1,2*N,3*N-1]).reshape((1,6))
     BCrows = BCrows.flatten()
 
     jacobianBC = J
@@ -451,6 +449,7 @@ def makeSystem(vf=None,pf=None, **kwargs):
     # Equations on boundary nodes now read 1*u_{lm} = .. , 1*v_{lm} = .., 1*w_{lm} = ..
     # The RHS for the equations is set in residualBC below
     F[BCrows] = 0.
+    # The residuals are zero because the correction, dx in J*dx = -F, should not change velocity BCs
 
     return jacobianBC, F 
 
@@ -501,15 +500,21 @@ def lineSearch(normFun,x0,dx,arr=None):
 
 
 
-def iterate(vf=None, pf=None,iterMax= 6, tol=5.0e-10,rcond=1.0e-06,doLineSearch=True,sigma1=True,sigma2=False,sigma3=False):
+def iterate(vf=None, pf=None,iterMax= 6, tol=5.0e-10,rcond=1.0e-06,doLineSearch=True,sigma1=True,sigma2=False):
     complexType=np.complex
     if pf is None: pf = vf.getScalar().zero()
     resnormFun = lambda x: x.residuals().appendField(x.div()).norm() 
 
     x = vf.appendField(pf)
 
+    # If eps2 != 0, force sigma2 to be false even if it is supplied as True
+    epsArr = x.flowDict['epsArr']
+    if (epsArr.size> 2) and abs( epsArr[2])> tol:
+        sigma2 = False
+        sigma3 = False
+
     x = setSymms(x)   # Nothing fancy here. Just setting velocities at wall to zero
-    x.imposeSymms(sigma1=sigma1, sigma2=sigma2, sigma3=sigma3)
+    x.imposeSymms(sigma1=sigma1, sigma2=sigma2)
     # Impose real-valuedness (by default), and sigma1, sigma2, sigma3 if supplied as kwargs 
 
 
@@ -531,7 +536,7 @@ def iterate(vf=None, pf=None,iterMax= 6, tol=5.0e-10,rcond=1.0e-06,doLineSearch=
         vf = x.slice(nd=[0,1,2]); pf = x.slice(nd=3)
 
 
-        J, F = makeSystem(vf=vf, pf=pf,sigma1=sigma1)
+        J, F = makeSystem(vf=vf, pf=pf,sigma1=sigma1,sigma2=sigma2)
                 
         sys.stdout.flush()
         
@@ -539,38 +544,47 @@ def iterate(vf=None, pf=None,iterMax= 6, tol=5.0e-10,rcond=1.0e-06,doLineSearch=
         linNorm = chebnorm(np.dot(J,dx) + F, x.N)
         print('Jacobian inversion returned with residual norm:',linNorm)
             
-       
-       
-        dxff = x.zero()
+        nz1 = x.nz; nx1 = x.nx
+        M = x.flowDict['M']; L = x.flowDict['L']
+        if sigma1: nz1 = M + 1
+        if sigma2: nx1 = L + 1
+        dx = dx.reshape((nx1, nz1, 4, x.N))
+
+        dxff = x.zero()     # Cast dx to this flowFieldRiblet instance
+        dxff[0,:nx1,:nz1] = dx      # If symmetries imposed, copy negative Fourier modes as are
+        # If no symmetries were imposed, this is it. 
+
         if sigma1:
-            M = x.flowDict['M']; L = x.flowDict['L']
-            # dx only has m<= 0 modes
-            dx = dx.reshape((x.nx,M+1,4,x.N))
-            dxff[0,:,:M+1] =  dx[:] # Assigning modes -M to 0 (inclusive)
-            
-            # Some manipulation before assigning modes m=1 to M
-            # Idea here is to get u_{l,m} = (-1)^l u_{l,-m}, with factor (-1)^{l+1} for w
-            dxTemp = dx[:,:M]  # Modes -M to -1
-            dxTemp = dxTemp[:,::-1] # Reorder as 1 to M
-            dxTemp[:,:,2] *= -1.    # Multiply w field with -1
-            lArr = np.arange(-L, L+1).reshape(( x.nx, 1,1,1))
-            dxTemp = ((-1.)**lArr)  * dxTemp
-            
-            dxff[0,:,M+1:] += dxTemp[:]
-        else:
-            dxff[0] = dx.reshape((x.nx,x.nz,4,x.N))
+            # Assigning coefficients for m > 0:
+            # Idea here is to get u_{l,m} = (-1)^l C.u_{l,-m}, with C = (1,1,-1,1) for u,v,w,p 
+            compArr = np.array([1., 1., -1., 1.]).reshape((1,1,4,1))
+            lArr = np.arange(-L, nx1-L).reshape(( nx1 , 1,1,1)) 
+            # l modes go from -L to L if sigma2 is not imposed, and from -L to 1 if it is
+            # Assigning modes m= M to m=1 using modes m=-M to m=-1:
+            dxff[0, :nx1, :M:-1] =  (-1.)**lArr * compArr * dxff[0,:nx1, :M:-1]
+        if sigma2:
+            # Assigning coefficients for m > 0:
+            # Idea here is to get u_{l,m}(y) = (-1)^(l+m) C.u_{-l,m}(-y), with C= (-1,-1,1,1) for u,v,w,p 
+            compArr = np.array([-1.,-1., 1., 1.]).reshape((1,1,4,1))
+            # sigma1 already accounted for, so the modes that need to be assigned are
+            #   m in {-M,M}, and l > 0. So, 
+            mArr = np.arange(-M, M+1).reshape((1,x.nz,1,1))
+            lArr = np.arange(-L, 0).reshape(( L , 1,1,1))
+            # Assigning modes l=-L to l=-1 to l=L to l=1, with coefficient at -y assigned to y
+            dxff[0, :L:-1] =  (-1.)**(lArr+mArr) * compArr * dxff[0,:L, :, :, ::-1]
         
         # Ensuring correction fields are real-valued and obey the required symmetries
-        # dxff[0] = 0.5*(dxff[0] + np.conj(dxff[0,::-1,::-1]))
-        dxff.imposeSymms(sigma1=sigma1, sigma2=sigma2, sigma3=sigma3)
+        # imposeSymms has realValued=True by default
+        dxff.imposeSymms(sigma1=sigma1, sigma2=sigma2)
         dxff[0,:,:,:3,[0,-1]] = 0.   # Correction field should not change velocity BCs, for Couette or channel flow
 
         if doLineSearch:
             x = lineSearch(resnormFun, x, dxff)
         else:
             x += dxff
-        
-        x.imposeSymms(sigma1=sigma1, sigma2=sigma2, sigma3=sigma3)
+       
+        # I don't have to keep using imposeSymms(), but it doesn't reduce performance, so might as well
+        x.imposeSymms(sigma1=sigma1, sigma2=sigma2)
         
 
         fnorm = resnormFun(x)
