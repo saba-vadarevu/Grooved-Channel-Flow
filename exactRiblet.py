@@ -253,7 +253,7 @@ def linr(flowDict, sigma1 = True, sigma2=False,realValued=False):
 
 
 
-def jcbn(vf,Lmat=None,sigma1=True,sigma2=False):
+def jcbn(vf,Lmat=None,sigma1=True,sigma2=False,realValued=False):
     if Lmat is None:
         raise RuntimeError('The Jacobian is added in-place to Lmat. Always supply Lmat. Returning.....')
 
@@ -288,7 +288,7 @@ def jcbn(vf,Lmat=None,sigma1=True,sigma2=False):
     #   I need iFun0 for this case
 
     Gmat = Lmat
-    assert (Gmat.shape[0] == nx1*nz1*4*N) and (Gmat.shape[1] == nx1*nz1*4*N)
+    #assert (Gmat.shape[0] == nx1*nz1*4*N) and (Gmat.shape[1] == nx1*nz1*4*N)
 
     # I will be using the functions np.diag() and np.dot() quite often, so,
     diag = np.diag; dot = np.dot
@@ -331,6 +331,9 @@ def jcbn(vf,Lmat=None,sigma1=True,sigma2=False):
     # Otherwise, G is added as is
     G = np.zeros((4*N, vf.nx*vf.nz*4*N), dtype=np.complex)
 
+    if realValued:
+        GReal = np.zeros((8*N, L+1,vf.nz,4,2*N), dtype=np.float)
+        L1 = 1
 
     for l in range(-L,L1):
         for m in range(-M,M1):
@@ -397,39 +400,73 @@ def jcbn(vf,Lmat=None,sigma1=True,sigma2=False):
                                 G[ rInd+2*N : rInd+3*N , cInd+2*N : cInd+3*N ] += Tz[q0-q]* w[li,mi].reshape((N,1)) * D \
                                         +Tz[q0-q]* diag(wy[li,mi]) 
             # Now, G is ready to be folded if sigma1 holds
-            if sigma1 or sigma2:
-                Gnew = G.reshape((4*N, vf.nx,vf.nz,4,N))
-                lArr = np.arange(-L,L+1).reshape((1,vf.nx, 1,1,1))
-                mArr = np.arange(-M,M+1).reshape((1,1, vf.nz,1,1))
-                if sigma1:
-                    compArr = np.array([1., 1., -1., 1.]).reshape((1,1,1,4,1))
-                    Gtemp  = Gnew[:,:, :M+1]      # Copying G as is for m <= 0
-                    Gtemp[:, :, :M] += ((-1.)**lArr) * compArr * Gnew[:,:,:M:-1]
-                    # For m>0 in G (or Gnew), array is reordered so m lines up with -m,
-                    #   u,v,p are multiplied by 1, w by -1,
-                    #    and columns for 'l' are multiplied with -1^l
-                else: Gtemp = Gnew
-                if sigma2:
-                    compArr = np.array([-1., -1., 1., 1.]).reshape((1,1,1,4,1))
-                    mArr = mArr[:,:,:nz1]; lArr = lArr[:,:L]
-                    Gtemp[:, :L] += (-1.)**(lArr+mArr) * compArr * Gtemp[:,:L:-1,:,:,::-1]
-                    Gtemp = Gtemp[:,:L+1]
-                    # l =0 mode is unchanged
-                    # l < 0 modes are already part of Gtemp
-                    # Take l>0 in Gtemp, flip y-part (last index) so that +y lines up with -y,
-                    #   flip l>0 modes so l lines up with -l,
-                    #   multiply u,v with -1, w,p with 1,
-                    #   multiply the whole thing with -1^(l+m)
-                    # and add the result to l<0 modes 
-                Gtemp = Gtemp.reshape((4*N, nx1*nz1*4*N))
-            else:
-                Gtemp = G
+            lArr0 = np.arange(-L,L+1).reshape((1,vf.nx, 1,1,1))
+            mArr = np.arange(-M,M+1).reshape((1,1, vf.nz,1,1))
+            Gnew = G.reshape((4*N,vf.nx, vf.nz, 4,N))
+            if realValued: 
+                Gtemp = Gnew.reshape((4,N,vf.nx, vf.nz, 4,N))
+                # With realValued=True, all modes are split as real and imaginary
+                # So, each block (for each Fourier mode) is now of size (4x2xN)x(4x2xN),
+                #   u_{lm} is of size 2N now, with Real(u_{lm}) first and Imag(u_{lm}) following
+                # Az+B*conj(z) = ((A_r+B_r) z_r +(B_i- A_i) z_i) + i ((A_i+B_i) z_r + (A_r-B_r) z_i)
+                GReal[:]  = 0.
+                GReal = GReal.reshape((4, 2*N, L+1, vf.nz, 4, 2*N))
 
+                # Assign terms due to Az = (A_r z_r - A_i z_i) + i (A_i z_r + A_r z_i)
+                #   for l <= 0 and all m 
+                GReal[:, :N,   :,:,:, :N] =  np.real(Gtemp[:,:   ,:L+1])        # First term in Az
+                GReal[:, :N,   :,:,:, N:] = -np.imag(Gtemp[:,:   ,:L+1])    # Second term in Az
+                GReal[:, N:,   :,:,:, :N] =  np.imag(Gtemp[:,:   ,:L+1])        # Third term in Az
+                GReal[:, N:,   :,:,:, N:] =  np.real(Gtemp[:,:   ,:L+1])        # Fourth term in Az
+
+                # Add terms due to B*conj(z) = (B_r z_r + B_i z_i) + i (B_i z_r - B_r z_i)
+                #   for l > 0 and all m.
+                # However, m need to be flipped so that (l,m) lines up with (-l,-m)
+                GReal[:, :N,   :L,:,:, :N] +=  np.real(Gtemp[:,:   ,:L:-1,::-1])        # First term in Az
+                GReal[:, :N,   :L,:,:, N:] +=  np.imag(Gtemp[:,:   ,:L:-1,::-1])    # Second term in Az
+                GReal[:, N:,   :L,:,:, :N] +=  np.imag(Gtemp[:,:   ,:L:-1,::-1])        # Third term in Az
+                GReal[:, N:,   :L,:,:, N:] += -np.real(Gtemp[:,:   ,:L:-1,::-1])        # Fourth term in Az
+
+                Gnew = GReal.reshape((8*N, L+1, vf.nz, 4,2*N))
+                lArr = lArr0[:,:L]
+            elif sigma2:
+                Gtemp = Gnew
+                compArr = np.array([-1., -1., 1., 1.]).reshape((1,1,1,4,1))
+                lArr = lArr0[:,:L]
+                Gtemp[:, :L] += (-1.)**(lArr+mArr) * compArr * Gtemp[:, :L:-1, :, :, ::-1]
+                Gtemp = Gtemp[:,:L+1]
+                # l =0 mode is unchanged
+                # l < 0 modes are already part of Gtemp
+                # Take l>0 in Gtemp, flip y-part (last index) so that +y lines up with -y,
+                #   flip l>0 modes so l lines up with -l,
+                #   multiply u,v with -1, w,p with 1,
+                #   multiply the whole thing with -1^(l+m)
+                # and add the result to l<0 modes 
+                Gnew = Gtemp
+
+            if sigma1:
+                # The relation between u_{lm} and u_{l,-m} remains unchaged with imposition of realValuedness
+                #   because there's no 1.j in the eqns u_{l,m} = (-1)^l u_{l,-m} etc..
+                compArr = np.array([1., 1., -1., 1.]).reshape((1,1,1,4,1))
+                Gtemp  = Gnew[:,:, :M+1]      # Copying G as is for m <= 0
+                Gtemp[:, :, :M] += ((-1.)**lArr0[:, :Gnew.shape[1]]) * compArr * Gnew[:,:,:M:-1]
+                # For m>0 in G (or Gnew), array is reordered so m lines up with -m,
+                #   u,v,p are multiplied by 1, w by -1,
+                #    and columns for 'l' are multiplied with -1^l
+                Gnew = Gtemp
                 
-            cInd = 0 # Because columns for all modes are filled at once
-            rInd = iFun(l,m)
-            Gmat[rInd: rInd+4*N, cInd: cInd+nx1*nz1*4*N] += Gtemp
 
+
+            if not realValued:                
+                Gnew = Gnew.reshape((4*N, nx1*nz1*4*N))
+                cInd = 0 # Because columns for all modes are filled at once
+                rInd = iFun(l,m)
+                Gmat[rInd: rInd+4*N, cInd: cInd+nx1*nz1*4*N] += Gnew
+            else:
+                Gnew = Gnew.reshape((8*N, (L+1)*nz1*8*N))
+                cInd = 0
+                rInd = (l+L)*(nz1*8*N) + (m+M)*8*N
+                Gmat[rInd: rInd+8*N, cInd: cInd+nx1*nz1*8*N] += Gnew
     return  
 
 
@@ -855,11 +892,18 @@ def testExactRibletModule(L=4,M=7,N=35,epsArr=np.array([0.,0.05,0.02,0.03]),sigm
 
 
     # Calculating non-linear matrix, and its product with the state-vector
-    #Lmat0 = Lmat.copy()
-    Lmat= np.zeros((xm_.size,xm_.size),dtype=np.complex)
-    jcbn(vf,Lmat=Lmat,sigma1=sigma1,sigma2=sigma2)
-    #Lmat = Lmat-Lmat0
-    NLterm = 0.5*np.dot(Lmat, xm_)
+    Lmat0 = Lmat.copy()
+    #Lmat= np.zeros((xm_.size,xm_.size),dtype=np.complex)
+    jcbn(vf,Lmat=Lmat,sigma1=sigma1,sigma2=sigma2,realValued=realValued)
+    Lmat = Lmat-Lmat0
+    if realValued:
+        NLtermTemp = 0.5*np.dot(Lmat, xmr_).reshape(xArrReal.shape)
+        NLterm = xArr[:x.nx//2+1].copy()
+        NLterm[:] = 0.
+        NLterm[:] = NLtermTemp[:,:,:,0] + 1.j*NLtermTemp[:,:,:,1]
+        NLterm = NLterm.flatten()
+    else:
+        NLterm = 0.5*np.dot(Lmat, xm_)
 
     # Calculating non-linear term from class methods
     NLtermClassFine = vf1.convNL()
@@ -874,7 +918,6 @@ def testExactRibletModule(L=4,M=7,N=35,epsArr=np.array([0.,0.05,0.02,0.03]),sigm
         NLresArr  = NLresArr[: ,:x.nz//2+1]
     if sigma2 or realValued:
         linResArr = linResArr[:x.nx//2+1]
-    if sigma2:
         NLresArr  = NLresArr[ :x.nx//2+1]
     linResm_ = linResArr.flatten()
     NLresm_  = NLresArr.flatten()
