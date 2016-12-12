@@ -41,7 +41,7 @@ def dict2ff(flowDict):
     return vf
 
 
-def linr(flowDict,complexType = np.complex, sigma1 = True, sigma2=False): 
+def linr(flowDict, sigma1 = True, sigma2=False,realValued=False): 
     """Returns matrix representing the linear operator for the equilibria/TWS for riblet case
     Inputs:
         flowDict
@@ -57,9 +57,7 @@ def linr(flowDict,complexType = np.complex, sigma1 = True, sigma2=False):
     else:
         epsArr = np.array([0., flowDict['eps']])
 
-    if complexType is not np.complex:
-        warn("complexType is set to np.complex. Other implementations not currently available.")
-        complexType = np.complex
+    complexType = np.complex
 
     L = flowDict['L']; M = flowDict['M']
     L1 = L+1
@@ -144,12 +142,6 @@ def linr(flowDict,complexType = np.complex, sigma1 = True, sigma2=False):
         L1 = 1; nx1 = L+1
     else: 
         L1 = L+1; nx1 = 2*L+1 
-    Lmat = np.zeros((nx1*nz1*N4,nx1*nz1*N4),dtype=complexType)
-    # If imposing sigma1, build for only m <= 0 
-    # If imposing sigma2, build for only l <= 0
-    #    FOR SIGMA2, THIS IS ALL THAT NEEDS TO BE DONE. Just set L1 to 1 and nx1 to L+1,
-    #       No more folding needed. 
-
 
     mat1 = np.zeros((nz1*N4,nz1*N4),dtype=complexType); mat2 = mat1.copy()
     # Define mat1 and mat2 such that all 'l' terms in the linear matrix can be 
@@ -203,21 +195,59 @@ def linr(flowDict,complexType = np.complex, sigma1 = True, sigma2=False):
         # Finally, reshaping
         L0wavyTemp = L0wavyTemp.reshape((s1, s2))
         # Now we're ready to multiply with (-1)^l and add to Lmat
-        
+   
+    if sigma2 and realValued: warn('Do not impose both sigma2 and realValued. ')
+    if realValued: 
+        nx1 = 2*(L+1)
+        complexType = np.float64
+    Lmat = np.zeros((nx1*nz1*N4,nx1*nz1*N4),dtype=complexType)
+    # If imposing sigma1, build for only m <= 0 
+    # If imposing sigma2, build for only l <= 0
+    #    FOR SIGMA2, THIS IS ALL THAT NEEDS TO BE DONE. Just set L1 to 1 and nx1 to L+1,
+    #       No more folding needed. 
+    # If imposing realValued, build for only l<=0, but with real and imaginary parts separated.
+    #   The number of variables remains about the same, and so does the number of equations.
+    #   But the size of each element halves, this reduces memory usage.
 
+    Ltemp = np.zeros((s1, s1),dtype=np.complex)
+    if realValued:
+        LtempReal = np.zeros((2*s1, 2*s1), dtype=np.float)
+        L1 = 1
     for l in range(-L,L1):
         lp = l+L
-
+        Ltemp[:] = 0.
         # Using s1 instead of nz*N4. If sigma1 is False, there is no difference
         # Matrix from laminar case where l=0
-        Lmat[lp*s1:(lp+1)*s1, lp*s1:(lp+1)*s1] = L0wavy[:s1, :s1]
+        Ltemp[:] = L0wavy[:s1, :s1]
         # Adding all the l-terms
-        Lmat[lp*s1:(lp+1)*s1, lp*s1:(lp+1)*s1] += l* mat1 + l**2 * mat2
+        Ltemp[:] += l* mat1 + l**2 * mat2
         
         if sigma1:
             # Adding L0wavyTemp:
-            Lmat[lp*s1:(lp+1)*s1, lp*s1: lp*s1+s2] += (-1.)**l  * L0wavyTemp
-    # As mentioned earlier, having L1 as 1 imposes sigma2. Nothing else needs to be done
+            Ltemp[:,:s2] += (-1.)**l  * L0wavyTemp
+        # As mentioned earlier, having L1 as 1 imposes sigma2. Nothing else needs to be done
+
+        if not realValued:
+            Lmat[lp*s1:(lp+1)*s1, lp*s1:(lp+1)*s1] = Ltemp
+    
+        else:
+            # With realValued=True, all modes are split as real and imaginary
+            # So, each block (for each Fourier mode) is now of size (4x2xN)x(4x2xN),
+            #   u_{lm} is of size 2N now, with Real(u_{lm}) first and Imag(u_{lm}) following
+            # Az = (A_r z_r - A_i z_i) + i (A_i z_r + A_r z_i)
+            LtempReal[:]  = 0.
+            LtempReal = LtempReal.reshape((s1//N, 2*N, s1//N, 2*N))
+            
+            Ltemp = Ltemp.reshape((s1//N,N, s1//N,N))
+            LtempReal[:, :N, :, :N] = np.real(Ltemp)        # First term in Az
+            LtempReal[:, :N, :, N:] = -np.imag(Ltemp)    # Second term in Az
+            LtempReal[:, N:, :, :N] = np.imag(Ltemp)        # Third term in Az
+            LtempReal[:, N:, :, N:] = np.real(Ltemp)        # Fourth term in Az
+
+            Ltemp = Ltemp.reshape((s1,s1))
+            LtempReal = LtempReal.reshape((2*s1, 2*s1))
+
+            Lmat[lp*2*s1:(lp+1)*2*s1, lp*2*s1:(lp+1)*2*s1] = LtempReal
 
     return Lmat
 
@@ -430,7 +460,7 @@ def makeSystem(vf=None,pf=None, **kwargs):
     if pf is None:
         pf = vf.getScalar().zero()
         
-    J = linr(vf.flowDict, complexType=complexType, sigma1=sigma1,sigma2=sigma2)  # Get Lmat
+    J = linr(vf.flowDict, sigma1=sigma1,sigma2=sigma2)  # Get Lmat
     jcbn(vf, Lmat=J, sigma1=sigma1,sigma2=sigma2)    # Add non-linear jacobian to Lmat
     F = (vf.residuals(pField=pf).appendField( vf.div() ) )[0,:nx1,:nz1].flatten() 
 
@@ -726,71 +756,6 @@ def shearStress(vf):
 
 
 
-
-
-def linrInv(flowDict):
-    L = flowDict['L']; M = flowDict['M']; N = flowDict['N']
-    nx = 2*L+1; nz = 2*M+1; N4 = 4*N
-    a = flowDict['alpha']; a2 = a**2; Re = flowDict['Re']
-    
-    Lmat_lam = lam.linr(updateDict(flowDict,{'L':0,'alpha':0.}))
-    
-    LmatInv = np.zeros((nx,nz*N4,nz*N4), dtype=np.complex)
-    I = np.identity(N)
-    assert Lmat_lam.shape[0] == nz*N4
-    
-    # L_lam is built for the case of L= 0. For exact solutions, we have L!= 0
-    #   So, we take L_lam, and add i.l.alpha or -l**2.a**2 as appropriate
-    Lmat = np.zeros((nx*nz*N4,nx*nz*N4),dtype=np.complex)
-
-    mat1 = np.zeros((nz*N4,nz*N4),dtype=np.complex); mat2 = mat1.copy()
-    # Define mat1 and mat2 such that all 'l' terms in the linear matrix can be 
-    #   written as l * mat1  + l^2 *mat2
-    for mp in range(nz):
-        # Row numbers correspond to equation, column numbers to field variable
-        #   mp*N4 +     (0:N)   : x-momentum or u
-        #               (N:2N)  : y-momentum or v
-        #               (2N:3N) : z-momentum or w
-        #               (3N:4N) : continuity or p
-
-        # x-momentum
-        # (-1/Re)* (d_xx u)_lm = l**2 * a2/Re * I * u_lm
-        mat2[mp*N4:mp*N4+N, mp*N4:mp*N4+N]      = a2/Re*I           
-        # (d_x p)_lm = l * i*a*I * p_lm
-        mat1[mp*N4:mp*N4+N, mp*N4+3*N:mp*N4+N4] = 1.j*a*I
-
-        # y-momentum
-        # (-1/Re)* (d_xx v)_lm = l**2 * a2/Re * I * v_lm
-        mat2[mp*N4+N:mp*N4+2*N, mp*N4+N:mp*N4+2*N]      = a2/Re*I           
-
-        # z-momentum
-        # (-1/Re)* (d_xx u)_lm = l**2 * a2/Re * I * u_lm
-        mat2[mp*N4+2*N:mp*N4+3*N, mp*N4+2*N:mp*N4+3*N]  = a2/Re*I           
-
-        # continuity
-        mat1[mp*N4+3*N:mp*N4+4*N, mp*N4 : mp*N4+N]      = 1.j*a*I
-
-    # Boundary conditions on the linear matrix:
-    #   Impose them as usual- replace some rows with zeros, and set diagonal 
-    #       elements to 1
-    BCrows = N4* np.arange(nz).reshape((nz,1)) + np.array([0,N-1,N,2*N-1,2*N,3*N-1]).reshape((1,6))
-    BCrows = BCrows.flatten()
-
-    for lp in range(nx):
-        l = lp-L 
-        # Matrix from laminar case where l=0
-        Ltemp = Lmat_lam.copy()
-        # Adding all the l-terms
-        Ltemp += l* mat1 + l**2 * mat2
-
-        # Imposing BCs
-        Ltemp[BCrows,:] = 0.
-        Ltemp[BCrows,BCrows] = 1.
-
-        LmatInv[lp] = np.linalg.pinv(Ltemp)
-
-    return LmatInv
-
 def averagedU(vf,nd=0, zArr = None, ny = 50):
     """ Velocity averaged in wall-parallel directions in physical domain"""
     b = vf.flowDict['beta']; Lz = 2.*np.pi/b
@@ -846,7 +811,7 @@ def averagedU(vf,nd=0, zArr = None, ny = 50):
     
 
 
-def testExactRibletModule(L=4,M=7,N=35,epsArr=np.array([0.,0.05,0.02,0.03]),sigma1=True,sigma2=False,complexType=np.complex):
+def testExactRibletModule(L=4,M=7,N=35,epsArr=np.array([0.,0.05,0.02,0.03]),sigma1=True,sigma2=False,complexType=np.complex,realValued=False):
     print('Testing for symmetries sigma1=%r and sigma2=%r to tolerance %.3g'%(sigma1,sigma2,tol))
     vf = h52ff('testFields/eq1.h5')
     pf = h52ff('testFields/pres_eq1.h5',pres=True)
@@ -864,12 +829,25 @@ def testExactRibletModule(L=4,M=7,N=35,epsArr=np.array([0.,0.05,0.02,0.03]),sigm
         xArr = xArr[:,:x.nz//2+1]
     if sigma2:
         xArr = xArr[:x.nx//2+1]
+    if realValued:
+        if sigma2: warn("Don't impose both sigma2 and realValued")
+        xArrReal = np.zeros((x.nx//2+1, xArr.shape[1],4,2,N),dtype=np.float)
+        xArrReal[:,:,:,0] = np.real(xArr[:x.nx//2+1])
+        xArrReal[:,:,:,1] = np.imag(xArr[:x.nx//2+1])
+        xmr_ = xArrReal.flatten()
     xm_ = xArr.flatten()
 
     
     # Calculating linear matrix, and the product with state-vector
-    Lmat = linr(vf.flowDict,complexType=complexType,sigma1=sigma1,sigma2=sigma2)
-    linTerm = np.dot(Lmat, xm_)
+    Lmat = linr(vf.flowDict,sigma1=sigma1,sigma2=sigma2,realValued=realValued)
+    if realValued:
+        linTermTemp = np.dot(Lmat, xmr_).reshape(xArrReal.shape)
+        linTerm = xArr[:x.nx//2+1].copy()
+        linTerm[:] = 0.
+        linTerm[:] = linTermTemp[:,:,:,0] + 1.j*linTermTemp[:,:,:,1]
+        linTerm = linTerm.flatten()
+    else:
+        linTerm = np.dot(Lmat, xm_)
 
     # Calculating linear term from class methods
     linTermClass = (vf1.laplacian()/(-1.*vf1.flowDict['Re']) + pf1.grad()).appendField(vf1.div())
@@ -877,9 +855,10 @@ def testExactRibletModule(L=4,M=7,N=35,epsArr=np.array([0.,0.05,0.02,0.03]),sigm
 
 
     # Calculating non-linear matrix, and its product with the state-vector
-    Lmat0 = Lmat.copy()
+    #Lmat0 = Lmat.copy()
+    Lmat= np.zeros((xm_.size,xm_.size),dtype=np.complex)
     jcbn(vf,Lmat=Lmat,sigma1=sigma1,sigma2=sigma2)
-    Lmat = Lmat-Lmat0
+    #Lmat = Lmat-Lmat0
     NLterm = 0.5*np.dot(Lmat, xm_)
 
     # Calculating non-linear term from class methods
@@ -893,8 +872,9 @@ def testExactRibletModule(L=4,M=7,N=35,epsArr=np.array([0.,0.05,0.02,0.03]),sigm
     if sigma1:
         linResArr = linResArr[:,:x.nz//2+1]
         NLresArr  = NLresArr[: ,:x.nz//2+1]
-    if sigma2:
+    if sigma2 or realValued:
         linResArr = linResArr[:x.nx//2+1]
+    if sigma2:
         NLresArr  = NLresArr[ :x.nx//2+1]
     linResm_ = linResArr.flatten()
     NLresm_  = NLresArr.flatten()
@@ -910,9 +890,9 @@ def testExactRibletModule(L=4,M=7,N=35,epsArr=np.array([0.,0.05,0.02,0.03]),sigm
         print('sigma2 invariance norm of x is', (x - x.rotateZ().shiftPhase(phiX=np.pi, phiZ=np.pi) ).norm())
     
     if not linTestResult :
-        print('Residual norm for linear is:',np.linalg.norm(linTerm - linTermClass[0,:,:nz1].flatten()))
+        print('Residual norm for linear is:',linResNorm)
     if not  NLtestResult:
-        print('Residual norm for non-linear is:',np.linalg.norm(NLterm - NLtermClass[0,:,:nz1].flatten()))
+        print('Residual norm for non-linear is:',NLresNorm)
 
     if linTestResult and NLtestResult:
         print("Success for both tests!")
