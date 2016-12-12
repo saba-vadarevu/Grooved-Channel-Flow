@@ -500,7 +500,28 @@ def lineSearch(normFun,x0,dx,arr=None):
 
 
 
-def iterate(vf=None, pf=None,iterMax= 6, tol=5.0e-10,rcond=1.0e-06,doLineSearch=True,sigma1=True,sigma2=False):
+def iterate(vf=None, pf=None,iterMax= 6, tol=5.0e-10,rcond=1.0e-06,doLineSearch=True,sigma1=True,sigma2=False,chebWeight=True):
+
+    N = vf.N
+    w = clencurt(N)
+    q = np.sqrt(w)
+    qinv = 1./q
+    Q = np.diag(q)
+    Qinv = np.diag(qinv)
+    def __weightJ(Jacobian):
+        for k1 in range(Jacobian.shape[0]//N):
+            for k2 in range(Jacobian.shape[1]//N):
+                Jacobian[k1*N:(k1+1)*N, k2*N:(k2+1)*N] = np.dot( Q, np.dot(Jacobian[k1*N:(k1+1)*N, k2*N:(k2+1)*N], Qinv) )
+        return
+    def __weightF(residual):
+        for k in range(residual.size//N):
+            residual[k*N: (k+1)*N] = np.dot(Q, residual[k*N:(k+1)*N])
+        return
+    def __unweightdx(deltaX):
+        for k in range(deltaX.size//N):
+            deltaX[k*N:(k+1)*N] = np.dot(Qinv, deltaX[k*N:(k+1)*N])
+        return
+
     complexType=np.complex
     if pf is None: pf = vf.getScalar().zero()
     resnormFun = lambda x: x.residuals().appendField(x.div()).norm() 
@@ -539,10 +560,18 @@ def iterate(vf=None, pf=None,iterMax= 6, tol=5.0e-10,rcond=1.0e-06,doLineSearch=
         J, F = makeSystem(vf=vf, pf=pf,sigma1=sigma1,sigma2=sigma2)
                 
         sys.stdout.flush()
+
+        # Weight Jacobian and residual matrices for clencurt weighing
+        if chebWeight:
+            __weightJ(J)
+            __weightF(F)
         
         dx, linNorm, jRank,sVals = np.linalg.lstsq(J,-F,rcond=rcond)
         linNorm = chebnorm(np.dot(J,dx) + F, x.N)
         print('Jacobian inversion returned with residual norm:',linNorm)
+    
+        if chebWeight:
+            __unweightdx(dx)
             
         nz1 = x.nz; nx1 = x.nx
         M = x.flowDict['M']; L = x.flowDict['L']
