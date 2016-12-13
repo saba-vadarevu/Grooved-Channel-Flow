@@ -490,23 +490,41 @@ def makeSystem(vf=None,pf=None, **kwargs):
     N = vf.N; N4 = 4*N
     L = vf.nx//2; M = vf.nz//2
     sigma1 = kwargs['sigma1']; complexType = np.complex ; sigma2 = kwargs['sigma2']
+    realValued = kwargs['realValued']
     nz1 = vf.nz; nx1 = vf.nx
     if sigma1: nz1 = M+1
-    if sigma2: nx1 = L+1
+    if sigma2 or realValued: nx1 = L+1
 
     if pf is None:
         pf = vf.getScalar().zero()
         
-    J = linr(vf.flowDict, sigma1=sigma1,sigma2=sigma2)  # Get Lmat
-    jcbn(vf, Lmat=J, sigma1=sigma1,sigma2=sigma2)    # Add non-linear jacobian to Lmat
-    F = (vf.residuals(pField=pf).appendField( vf.div() ) )[0,:nx1,:nz1].flatten() 
+    J = linr(vf.flowDict, sigma1=sigma1,sigma2=sigma2, realValued=realValued)  # Get Lmat
+    jcbn(vf, Lmat=J, sigma1=sigma1,sigma2=sigma2, realValued = realValued)    # Add non-linear jacobian to Lmat
+    F = (vf.residuals(pField=pf).appendField( vf.div() ) ).copyArray()[0,:nx1,:nz1] 
+    if realValued:
+        # Split residuals into real and imaginary parts
+        F1  = np.zeros((nx1, nz1, 4,2,N),dtype=np.float)
+        F1[:,:,:,0] = np.real(F)
+        F1[:,:,:,1] = np.imag(F)
+        F = F1
+
+    F = F.flatten()
+
 
     
     # Some simple checks
     assert (F.ndim == 1) and (J.ndim == 2)
-    assert (J.shape[0] == nx1*nz1*N4) and (F.size == nx1*nz1*N4)
-    
-    BCrows = N4*np.arange(nx1*nz1).reshape((nx1*nz1,1)) + np.array([0,N-1,N,2*N-1,2*N,3*N-1]).reshape((1,6))
+    # assert (J.shape[0] == nx1*nz1*N4) and (F.size == nx1*nz1*N4)
+    if not realValued: 
+        BCrows = N4*np.arange(nx1*nz1).reshape((nx1*nz1,1)) + np.array([0,N-1,N,2*N-1,2*N,3*N-1]).reshape((1,6))
+    else:
+        # When realValued, each mode is split into real and imaginary parts, 
+        #   so BCs on each Fourier mode block to be applied on 0,N-1,N,...,5*N, 6*N-1
+        BCrows0 = 8*N*np.arange((L+1)*nz1).reshape(((L+1)*nz1,1))
+        BCrows1 = N*np.arange(6).reshape((6,1)) + np.array([0,N-1]).reshape((1,2))
+        BCrows1 = BCrows1.reshape((1,12))
+        BCrows = BCrows0 + BCrows1
+                
     BCrows = BCrows.flatten()
 
     jacobianBC = J
@@ -567,7 +585,7 @@ def lineSearch(normFun,x0,dx,arr=None):
 
 
 
-def iterate(vf=None, pf=None,iterMax= 6, tol=5.0e-10,rcond=1.0e-06,doLineSearch=True,sigma1=True,sigma2=False,chebWeight=True):
+def iterate(vf=None, pf=None,iterMax= 6, tol=5.0e-10,rcond=1.0e-06,doLineSearch=True,sigma1=True,sigma2=False,chebWeight=True,realValued=False):
 
     N = vf.N
     w = clencurt(N)
@@ -624,7 +642,7 @@ def iterate(vf=None, pf=None,iterMax= 6, tol=5.0e-10,rcond=1.0e-06,doLineSearch=
         vf = x.slice(nd=[0,1,2]); pf = x.slice(nd=3)
 
 
-        J, F = makeSystem(vf=vf, pf=pf,sigma1=sigma1,sigma2=sigma2)
+        J, F = makeSystem(vf=vf, pf=pf,sigma1=sigma1,sigma2=sigma2, realValued=realValued)
                 
         sys.stdout.flush()
 
@@ -641,15 +659,26 @@ def iterate(vf=None, pf=None,iterMax= 6, tol=5.0e-10,rcond=1.0e-06,doLineSearch=
             __unweightdx(dx)
             
         nz1 = x.nz; nx1 = x.nx
-        M = x.flowDict['M']; L = x.flowDict['L']
+        M = x.flowDict['M']; L = x.flowDict['L']; N = x.N
         if sigma1: nz1 = M + 1
         if sigma2: nx1 = L + 1
+
+        # If realValued, dx has real entries 
+        # Let's turn this into the usual complex array
+        if realValued:
+            dx1 = dx.copy()
+            dx = np.zeros((L+1, nz1, 4,N), dtype=x.dtype)
+            dx1 = dx1.reshape((L+1, nz1, 4, 2, N))
+            dx[:] = dx1[:,:,:,0] + 1.j*dx1[:,:,:,1] # real part + i * imaginary part
+            nx1 = L+1
+            # Now dx is complex-valued and has modes l=-L to 0 , and m -M to 0 or M (depending on sigma1)
         dx = dx.reshape((nx1, nz1, 4, x.N))
 
         dxff = x.zero()     # Cast dx to this flowFieldRiblet instance
         dxff[0,:nx1,:nz1] = dx      # If symmetries imposed, copy negative Fourier modes as are
         # If no symmetries were imposed, this is it. 
 
+        # Even if realValued, use the same de-folding for sigma1
         if sigma1:
             # Assigning coefficients for m > 0:
             # Idea here is to get u_{l,m} = (-1)^l C.u_{l,-m}, with C = (1,1,-1,1) for u,v,w,p 
@@ -668,6 +697,14 @@ def iterate(vf=None, pf=None,iterMax= 6, tol=5.0e-10,rcond=1.0e-06,doLineSearch=
             lArr = np.arange(-L, 0).reshape(( L , 1,1,1))
             # Assigning modes l=-L to l=-1 to l=L to l=1, with coefficient at -y assigned to y
             dxff[0, :L:-1] =  (-1.)**(lArr+mArr) * compArr * dxff[0,:L, :, :, ::-1]
+
+        if realValued:
+            # Assign l>0 using complex conjugacy instead of the sigma2 relation
+            dxff[0,:L:-1, ::-1] = np.conjugate(dxff[0,:L])
+            # LHS: l from L to 1, m from M to -M
+            # RHS: l from -L to -1, m from -M to M, it's complex conjugate
+        # Now dxff is all sorted out
+
         
         # Ensuring correction fields are real-valued and obey the required symmetries
         # imposeSymms has realValued=True by default
