@@ -101,28 +101,29 @@ def mapData2ff(eps=0.01, g= 1.0, Re=100, theta=0):
     #vf, pf,paramDict = data2ff(fName=folderPath+fileName,ind=3*gInd+ReInd)
     return data2ff(fName=seprnFolderPath+fileName,ind=3*gInd+ReInd)
 
-def h52ff(fileName,pres=False):
+def h52ff(fName,pres=False,presPad=True):
     """Reads velocity data from h5 file and creates a flowFieldRiblet object out of it
     NOTE 1: Currently, this function only works for Couette flow equilibria, and possibly for
         TWS in Poiseuille flow (but 'isPois' in flowDict has to be manually set to 1, 
             and (-vf.y+1-vf.y**2) must be  added to the zeroth mode)
         Other solutions might have different resolutions, so the defaults I use here may not work.
-    NOTE 2: The h5 files currently have only velocity data. ChannelFlow has a Poisson solver for pressure,
-        and I have one too. For now, I'll use my own solver. 
     """
     if pres: 
-        L = 23; M = 23; nd = 1
+        if presPad:
+            L = 23; M = 23; nd = 1
+        else:
+            L=15; M=15; nd = 1
     else: 
         L = 15; M = 15; nd = 3
 
     nx = 2*L+2; nz = 2*M+2
 
-    assert fileName[-3:] == ".h5"
-    f = h5py.File(fileName, 'r')
-    u = np.array(f['data']['u'])
-    x = np.array(f['geom']['x'])
-    y = np.array(f['geom']['y'])
-    z = np.array(f['geom']['z'])
+    #assert fileName[-3:] == ".h5"
+    with h5py.File(fName,'r') as f:
+        u = np.array(f['data']['u'])
+        x = np.array(f['geom']['x'])
+        y = np.array(f['geom']['y'])
+        z = np.array(f['geom']['z'])
 
     # I order my field-objects as (t, x, z, component, y)
     # First, reshaping to (x,z,y)
@@ -154,6 +155,7 @@ def h52ff(fileName,pres=False):
     if L != 23:
         obj = obj.slice(L=23,M=23)  # Padding with extra modes for computation. Gibson's code uses L=M=23 
     if not pres: obj[0,obj.nx//2, obj.nz//2, 0] += obj.y
+
     
     return obj
 
@@ -168,7 +170,12 @@ def loadh5(filename):
     for key in field.attrs:
         tempDict[key] = field.attrs[key]
     tempDict['nd']=4    # Solution field must include a pressure field
-    ff = flowFieldRiblet(arr=np.array(field), flowDict=tempDict)
+    if 'class' not in tempDict:
+        tempDict['class'] = 'flowFieldRiblet'
+    if tempDict['class'] == 'flowFieldRiblet':
+        ff = flowFieldRiblet(arr=np.array(field), flowDict=tempDict)
+    else:
+        ff = flowFieldWavy(arr=np.array(field), flowDict=tempDict)
     inFile.close()
     return ff
 
@@ -600,6 +607,53 @@ class flowFieldWavy(flowField):
         n1 = 2.*a*eps*np.sin(a*xLoc+b*zLoc);    n3 = 2.*b*eps*np.sin(a*xLoc+b*zLoc);  n2 = 1.
         nAmp = np.sqrt(n1**2+n2**2+n3**2)
         return (n1/nAmp, n2/nAmp, n3/nAmp)
+    
+    def saveh5fName(self,fNamePrefix='ribEq1',prefix='./'):
+        fName = 'L'+str(self.flowDict['L'])+'M'+str(self.flowDict['M'])+'N'+str(self.flowDict['N'])
+        if 'epsArr' in self.flowDict:
+            epsArr = self.flowDict['epsArr']
+        else:
+            epsArr = np.array([0.,self.flowDict['eps']])
+        epsStr = ''
+        for q in range(epsArr.size):
+            if q != 0:
+                epsStr += 'E%d_%03d'%(q,1000.*round(epsArr[q],3))
+        fName = fName + epsStr + '.hdf5'
+
+        fName = fNamePrefix + fName
+        return fName , prefix
+
+
+    def saveh5(self,fNamePrefix='ribEq1',prefix='./'):
+        """ Saves self to a hdf5 file
+        Input:
+            fNamePrefix (None): prefix to file name, such as LBeq1
+            prefix ('solutions/'): Path prefix
+        Name of hdf5 file is fNamePrefix+prefix+'LxMxNxExxxx.hdf5'
+        
+        fName = 'L'+str(self.flowDict['L'])+'M'+str(self.flowDict['M'])+'N'+str(self.flowDict['N'])
+        fName = fName + 'E'+ '%04d' %(int( round(self.flowDict['eps']*1.0e4))) + '.hdf5'
+
+        fName = prefix + fNamePrefix + fName
+	"""
+
+        fName, pathPrefix = self.saveh5fName(fNamePrefix=fNamePrefix, prefix=prefix)
+        fName = pathPrefix + fName
+
+        outFile = h5py.File(fName, "w")
+        assert self.nd == 4, "Save flowFields that include a pressure field"
+
+        field = outFile.create_dataset("field",data=self.flatten(),compression='gzip')
+
+        for key in self.flowDict:
+            field.attrs[key] = self.flowDict[key]
+        if isinstance(self,flowFieldRiblet):
+            field.attrs['class'] = 'flowFieldRiblet'
+
+        print("saved field to ",fName)
+        outFile.close()
+        return
+
 
    
 def weighted2ff(flowDict=None,arr=None,weights=None):
@@ -746,49 +800,6 @@ class flowFieldRiblet(flowFieldWavy):
 
         return partialz2
     
-
-    def saveh5fName(self,fNamePrefix='ribEq1',prefix='./'):
-        fName = 'L'+str(self.flowDict['L'])+'M'+str(self.flowDict['M'])+'N'+str(self.flowDict['N'])
-        if 'epsArr' in self.flowDict:
-            epsArr = self.flowDict['epsArr']
-        else:
-            epsArr = np.array([0.,self.flowDict['eps']])
-        epsStr = ''
-        for q in range(epsArr.size):
-            if q != 0:
-                epsStr += 'E%d_%03d'%(q,1000.*round(epsArr[q],3))
-        fName = fName + epsStr + '.hdf5'
-
-        fName = fNamePrefix + fName
-        return fName , prefix
-
-
-    def saveh5(self,fNamePrefix='ribEq1',prefix='./'):
-        """ Saves self to a hdf5 file
-        Input:
-            fNamePrefix (None): prefix to file name, such as LBeq1
-            prefix ('solutions/'): Path prefix
-        Name of hdf5 file is fNamePrefix+prefix+'LxMxNxExxxx.hdf5'
-        
-        fName = 'L'+str(self.flowDict['L'])+'M'+str(self.flowDict['M'])+'N'+str(self.flowDict['N'])
-        fName = fName + 'E'+ '%04d' %(int( round(self.flowDict['eps']*1.0e4))) + '.hdf5'
-
-        fName = prefix + fNamePrefix + fName
-	"""
-
-        fName, pathPrefix = self.saveh5fName(fNamePrefix=fNamePrefix, prefix=prefix)
-        fName = pathPrefix + fName
-
-        outFile = h5py.File(fName, "w")
-        assert self.nd == 4, "Save flowFields that include a pressure field"
-
-        field = outFile.create_dataset("field",data=self.flatten(),compression='gzip')
-
-        for key in self.flowDict:
-            field.attrs[key] = self.flowDict[key]
-        print("saved field to ",fName)
-        outFile.close()
-        return
 
     def powerInput(self, tol= 1.0e-07):
         """ Power input to Couette flow, defined as
@@ -939,3 +950,70 @@ def Tderivatives(flowDict,complexType=np.complex128):
     del tmpArr,tmpArr2
     return Tz, Tzz, Tz2
 
+
+
+
+
+def writeHdf5ChannelFlow(fName, x):
+    x = x.slice(L=15,M=15,N=35)
+    # Slice to L=15, M=15
+    
+    vf = x.slice(nd=[0,1,2])
+    pf = x.getScalar(nd=3)
+    vf[0,vf.nx//2, vf.nz//2,0] -= vf.y
+    # Save only perturations about u=y
+    
+    # Get component index nd to axis 0
+    # For axes 1,2,3, retain x,z,y. Rearrange them to x,y,z later
+    uSpecArr = np.zeros((3,vf.nx+1, vf.nz+1,vf.N),dtype=np.complex)
+    pSpecArr = np.zeros((1,vf.nx+1, vf.nz+1,vf.N),dtype=np.complex)
+    uSpecArr[0,1:,1:] = vf[0,:,:,0].reshape((vf.nx,vf.nz,vf.N))
+    uSpecArr[1,1:,1:] = vf[0,:,:,1].reshape((vf.nx,vf.nz,vf.N))
+    uSpecArr[2,1:,1:] = vf[0,:,:,2].reshape((vf.nx,vf.nz,vf.N))
+    pSpecArr[0,1:,1:] = pf[0,:,:,0].reshape((vf.nx,vf.nz,vf.N))
+    # Numpy's fft expects one extra negative Fourier mode, so the nx+1,nz+1
+    
+    uT = np.real(np.fft.ifftn(np.fft.ifftshift(uSpecArr*((vf.nx+1)*(vf.nz+1)),axes=[1,2]), axes=[1,2]))
+    pT = np.real(np.fft.ifftn(np.fft.ifftshift(pSpecArr*((vf.nx+1)*(vf.nz+1)),axes=[1,2]), axes=[1,2]))
+    
+    # Reshaping to x,y,z
+    u = np.zeros((3, vf.nx+1, vf.N, vf.nz+1))
+    p = np.zeros((1, vf.nx+1, vf.N, vf.nz+1))
+    for k in range(vf.nz+1):
+        u[:,:,:,k] = uT[:,:,k].reshape((3,vf.nx+1, vf.N))
+        p[:,:,:,k] = pT[:,:,k].reshape((1,vf.nx+1, vf.N))
+    
+    a = vf.flowDict['alpha']; b = vf.flowDict['beta']
+    Lx = 2.*np.pi/a; Lz = 2.*np.pi/b
+    xArr = np.arange(0., Lx, Lx/32.)
+    yArr = vf.y
+    zArr = np.arange(0., Lz, Lz/32.)
+    # These are the same grids in channelFlows hdf5
+    
+    if not (fName.endswith('.h5') or fName.endswith('.hdf5')):
+        fName = fName + '.hdf5'
+    with h5py.File(fName,"w") as outFile:
+        outFile.create_dataset("data/u", data=u,compression='gzip')
+        outFile.create_dataset("data/u0", data=vf.y,compression='gzip')
+        outFile.create_dataset("geom/x",data=xArr)
+        outFile.create_dataset("geom/y",data=yArr)
+        outFile.create_dataset("geom/z",data=zArr)
+        outFile.attrs['AmpArr'] = 2.*vf.flowDict['epsArr']
+    
+    if fName.endswith('.h5'):
+        fNamePres = fName[:-3] + '_pres'+'.h5'
+    else:
+        fNamePres = fName[:-5] + '_pres'+'.hdf5'
+    
+    with h5py.File(fNamePres,"w") as outFile:
+        outFile.create_dataset("data/u", data=p,compression='gzip')
+        outFile.create_dataset("geom/x",data=xArr)
+        outFile.create_dataset("geom/y",data=yArr)
+        outFile.create_dataset("geom/z",data=zArr)
+        outFile.attrs['AmpArr'] = 2.*vf.flowDict['epsArr']
+
+        
+    print("saved velocity and pressure fields to ",fName,fNamePres)
+    
+    
+    return
