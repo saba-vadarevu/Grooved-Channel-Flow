@@ -528,7 +528,7 @@ def residual(vf=None, pf=None, L=None, G=None):
 
 
 
-def makeSystem(flowDict=None,vf=None, pf=None, F=None, J=None, L=None, G=None, rect=False, resNorm=False):
+def makeSystem(flowDict=None,vf=None, pf=None, F=None, J=None, L=None, G=None, rect=False, resNorm=False,sigma=True):
     """
     Create functions for residual and Jacobian matrices, Boundary conditions and symmetries are imposed here. 
     The output functions
@@ -621,7 +621,7 @@ def makeSystem(flowDict=None,vf=None, pf=None, F=None, J=None, L=None, G=None, r
 
     
     
-def iterate(flowDict=None,vf=None, pf=None,iterMax= 6, tol=5.0e-14,rcond=1.0e-14, rect=False):
+def iterate(flowDict=None,vf=None, pf=None,iterMax= 6, tol=5.0e-14,rcond=1.0e-14, rect=False,sigma=True):
     if vf is None: 
         vf = dict2ff(flowDict)
     if pf is None: pf = flowFieldWavy(flowDict=updateDict(vf.flowDict,{'nd':1}))
@@ -633,7 +633,8 @@ def iterate(flowDict=None,vf=None, pf=None,iterMax= 6, tol=5.0e-14,rcond=1.0e-14
         #print('iter:',n)
         vf0 = vf.copy() # Just in case the iterations fail
         pf0 = pf.copy() 
-        J, F, fnorm = makeSystem(vf=vf, pf=pf, L=L, resNorm=True,rect=rect)
+        J, F, fnorm = makeSystem(vf=vf, pf=pf, L=L, resNorm=True,rect=rect,sigma=sigma)
+        ##### Rewrite makeSystem to accept sigma
         #print('fnorm:',fnorm)
         fnormArr.append(fnorm)
         if fnorm <= tol:
@@ -654,7 +655,9 @@ def iterate(flowDict=None,vf=None, pf=None,iterMax= 6, tol=5.0e-14,rcond=1.0e-14
         #print('len(sVals:',sVals.size, ' Last 3 singular values:',sVals[-3:])
         if linNorm > linTol:
             print('Least squares problem returned residual norm:',linNorm,' which is greater than tolerance:',linTol)
-            
+        if sigma:
+            # Recast dx so that it's of the right size
+            pass
             
         
         dxf = arr2ff(dx,updateDict(vf.flowDict,{'nd':4}))

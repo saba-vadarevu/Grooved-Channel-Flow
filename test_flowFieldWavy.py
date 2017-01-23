@@ -182,7 +182,7 @@ class WavyTestCase(unittest.TestCase):
             in the transformed space. If I redefine the norm later, 
             expect this test to fail."""
         # vf = \sum_k \sum_l \sum_m l^2 m^2 (1-y^2) e^{i(kwt + lax + mbz)}
-        # ||vf||^2 := 1/(T.L_x.L_z)  \int_t \int_x \int_z \int_y vf * vf  dy dz dx dt
+        # ||vf||^2 := 1/(T.L_x.L_z)  \int_t \int_x \int_z \int_y vf * vf.conj()  dy dz dx dt
         #    since \int_{x=0}^{2pi/a} e^{ilax} = 0   for any non-zero integer 'l', 
         #    it can be shown that 
         # ||v||^2 = \sum_k \sum_l \sum_m   (\int_y v_klm * v_klm.conj() dy)
@@ -196,7 +196,8 @@ class WavyTestCase(unittest.TestCase):
 
         Lx = 2.*np.pi/vf.flowDict['alpha']
         Lz = 2.*np.pi/vf.flowDict['beta']
-        scal = 1./Lx/Lz/2.
+        # scal = 1./Lx/Lz/2.
+        scal = 0.5
    
         # 
         self.assertAlmostEqual(vf.getScalar().norm()**2,scal*16./3.*l4Sum*m4Sum)

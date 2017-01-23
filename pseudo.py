@@ -1,19 +1,18 @@
+"""
 # pseudo.py
 #
 # Contains functions:
-#		y,DM = chebdif(N,M): Takes number of nodes 'N', and required number of derivatives'M'
-#					and returns Chebyshev nodes 'y', and differentiation matrices in 'DM'
-#		DM = poldif(x,M): Takes a general grid 'x', and required number of derivatives'M'
-#					and returns differentiation matrices in 'DM' based on Lagrange interpolation
-#		w = clencurt(N): Takes number of nodes 'N'
-#					and returns Clenshaw-Curtis weights 'w', for 'N' Chebyshev nodes between -1 and 1
-##--------------------------------------------------------------------------------------------------------
-# Update:
-# Earlier version used 2-D arrays, as used by Matlab, as the default. Vectors
-#  were stored as (N,1) arrays. 
-# This version uses 1-D arrays as the default for vectors
-
-
+#   y,DM    = chebdif(N,M),     Differentiation matrices (Chebyshev collocation)
+#   DM      = poldif(x,M),      Differentiation matrices (Lagrange polynomial collocation)
+#   w       = clencurt(N),      Clenshaw-Curtis weights
+#   norm2   = chebnorm(vec,N),  2-norm using Clenshaw-Curtis weights
+#   norm2   = chebnorm2(vec,N), 2-norm using Clenshaw-Curtis weights
+#   norm1   = chebnorm1(vec,N), 1-norm using Clenshaw-Curtis weights
+#   coeffs  = chebcoeffs(f),    Chebyshev coefficients from collocation
+#   coll    = chebcoll_vec(a),  Collocation values from Chebyshev coefficients
+#   interp  = chebint(fk,x),    Interpolation from Chebyshev grid to a general grid
+#   integral= chebintegrate(f), Integrate function values with BC f(y=-1) = 0
+"""
 ## ----------------------------------------------------
 ## ACKNOWLEDGEMENT
 
@@ -27,299 +26,310 @@
 # The webpage for the differentiation suite:
 # http://dip.sun.ac.za/~weideman/research/differ.html
 
-
 # 'clencurt' is from a blog by Dr. Greg von Winckel:
 #	http://www.scientificpython.net/pyblog/clenshaw-curtis-quadrature	
 # However, a minor change has been made- only the weight matrix is returned, as opposed to returning both the weights
 #		and the nodes, as in the origion version on the blog
 
 
-
+# Sabarish Vadarevu
+# Aerodynamics and Flight Mechanics group
+# University of Southampton, United Kingdom
+# Email: SBV1G13@SOTON.AC.UK
 ###--------------------------------------------------------
 
-import scipy as sp 
 import numpy as np
-from operator import mul
 from scipy.linalg import toeplitz
 from scipy.fftpack import ifft
 
 def chebdif(N,M):
+    """ y,DM =chebdif(N,M):  Differentiation matrices for Chebyshev collocation.
+    Inputs: 
+        N:  Number of nodes
+        M:  Number of derivatives
+    Outputs:
+        y:  Chebyshev collocation nodes on [1,-1], 1d np.ndarray of size N
+        DM: Differentiation matrices of shape (N,N,M).
+                Extract m^th differentiation matrix as Dm = DM[:,:,m-1].reshape((N,N))
+                For m^th derivative, invoke as 
+                    f_m = np.dot(Dm, f), where f is a vector of function values on nodes 'y'
+    """
+    I = np.identity(N)		# Identity matrix
+    #L = bool(I)
 
-	I = sp.identity(N)		# Identity matrix
-	#L = bool(I)
+    n1 = np.int(np.floor(N/2.))		# Indices for flipping trick
+    n2 = np.int(np.ceil(N/2.))
 
-	n1 = int(sp.floor(N/2.))		# Indices for flipping trick
-	n2 = int(sp.ceil(N/2.))
+    # Theta vector as column vector
+    k=np.vstack(np.linspace(0.,N-1.,N))		
+    th=k*np.pi/(N-1.)
 
-	k=sp.vstack(sp.linspace(0.,N-1.,N))	# Theta vector
-	th=k*sp.pi/(N-1.)
+    x=np.sin( np.pi* np.vstack( np.linspace(N-1.,1.-N,N) ) /2./(N-1.) )	# Chebyshev nodes
 
-	x=sp.sin(sp.pi*sp.vstack(sp.linspace(N-1.,1.-N,N))/2./(N-1.))	# Chebyshev nodes
+    T = np.tile(th/2.,(1,N))
+    DX= 2.*np.sin(T.T+T)*np.sin(T.T-T)	# Compute dx using trigonometric identity, improves accuracy
 
-	T = sp.tile(th/2.,(1,N))
-	DX= 2.*sp.sin(T.T+T)*sp.sin(T.T-T)	# Compute dx using trigonometric identity, improves accuracy
+    DX= np.vstack((DX[0:n1,:], np.flipud(np.fliplr([-1.*el for el in DX[0:n2,:]]))))
+    DX = DX+I			# Replace 0s in diagonal by 1s (required for calculating 1/dx)
 
-	DX= sp.vstack((DX[0:n1,:], sp.flipud(sp.fliplr([-1.*el for el in DX[0:n2,:]]))))
-	DX = DX+I			# Replace 0s in diagonal by 1s (required for calculating 1/dx)
-
-	C= toeplitz(pow(-1,k))			# Matrix with entries c(k)/c(j)
-	C[0,:] = [2.*el for el in C[0,:]]	
-	C[N-1,:] = [2.*el for el in C[N-1,:]]
-	C[:,0] = [el/2. for el in C[:,0]]
-	C[:,N-1] = [el/2. for el in C[:,N-1]]
+    C= toeplitz(pow(-1,k))			# Matrix with entries c(k)/c(j)
+    C[0,:] = [2.*el for el in C[0,:]]	
+    C[N-1,:] = [2.*el for el in C[N-1,:]]
+    C[:,0] = [el/2. for el in C[:,0]]
+    C[:,N-1] = [el/2. for el in C[:,N-1]]
 
 
-	Z = [1./el for el in DX]		# Z contains 1/dx, with zeros on diagonal
-	Z = Z - sp.diag(sp.diag(Z))
+    Z = [1./el for el in DX]		# Z contains 1/dx, with zeros on diagonal
+    Z = Z - np.diag(np.diag(Z))
 
+    D = np.identity(N)
+    DM = np.zeros((N,N,M))			# Output matrix, contains 'M' derivatives
 
-	D = sp.identity(N)
-	DM = sp.zeros((N,N,M))			# Output matrix, contains 'M' derivatives
+    for ell in range(0,M):
+        D[:,:] = Z*(C*(np.tile(np.diag(D),(N,1)).T)-D)	
+        D[:,:] = [(ell+1)*l for l in D]			# Off-diagonal elements
+        trc = np.array([-1.*l for l in np.sum(D.T,0)])
+        D = D - np.diag(np.diag(D)) + np.diag(trc)	# Correcting the main diagonal
+        DM[:,:,ell] = D
 
-	for ell in range(0,M):
-		D[:,:] = Z*(C*(sp.tile(sp.diag(D),(N,1)).T)-D)	
-		D[:,:] = [(ell+1)*l for l in D]			# Off-diagonal elements
-		trc = sp.array([-1.*l for l in sp.sum(D.T,0)])
-		D = D - sp.diag(sp.diag(D)) + sp.diag(trc)	# Correcting the main diagonal
-		DM[:,:,ell] = D
-
-   # Return collocation nodes as a 1-D array
-	return  x[:,0] , DM
+    # Return collocation nodes as a 1-D array
+    return  x[:,0] , DM
 
 
 def poldif(x,M):
-	N= sp.size(x)
-	x = sp.vstack(sp.array(x))
-	a,b = x.shape
-	if b != 1:
-		print ('x is not a vector')
+    """DM = poldif(x,M): Differentiation on nodes using Lagrange interpolation polynomials
+    Inputs:
+        x:  Collocation nodes
+        M:  Number of derivatives needed
+    Outputs:
+        DM: Differentiation matrices of shape (x.size,x.size,M).
+                Extract m^th differentiation matrix as Dm = DM[:,:,m-1].reshape((x.size,x.size))
+                For m^th derivative, invoke as 
+                    f_m = np.dot(Dm, f), where f is a vector of function values on nodes 'x'
+    """
+    N= np.size(x)
+    x = np.vstack(np.array(x))
+    a,b = x.shape
+    if b != 1:
+            print ('x is not a vector')
 
-	alpha = sp.ones((N,1))
-	B = sp.zeros((M,N))
+    alpha = np.ones((N,1))
+    B = np.zeros((M,N))
 
-	I = sp.identity(N)
+    I = np.identity(N)
 
-	XX = sp.tile(x,(1,N))
-	DX=XX-XX.T
-	DX = DX + I
+    XX = np.tile(x,(1,N))
+    DX=XX-XX.T
+    DX = DX + I
 
-	c = sp.ones((N,1))
-	sp.prod(DX,axis=1,out=c)
+    c = np.ones((N,1))
+    np.prod(DX,axis=1,out=c)
 
-	C = sp.tile(c, (1,N))
-	C = C/C.T
+    C = np.tile(c, (1,N))
+    C = C/C.T
 
-	Z = sp.array([1./l for l in DX])
-	Z = Z - sp.diag(sp.diag(Z))
+    Z = np.array([1./l for l in DX])
+    Z = Z - np.diag(np.diag(Z))
 
-	X = Z.T
+    X = Z.T
 
-	X = sp.delete(X.T,sp.linspace(0,N*N-1,N))
-	X = (X.reshape((N,N-1))).T
+    X = np.delete(X.T,np.linspace(0,N*N-1,N))
+    X = (X.reshape((N,N-1))).T
 
-	Y = sp.ones((N-1,N))
-	D = sp.identity(N)
-	DM = sp.ones((N,N,M))
+    Y = np.ones((N-1,N))
+    D = np.identity(N)
+    DM = np.ones((N,N,M))
 
-	for ell in range(0,M):
-		Y = sp.cumsum(sp.vstack((B[ell,:], (ell+1.)*Y[0:N-1,:]*X)) , axis=0,dtype=float)
-		D = (ell+1.)*Z*(C*(sp.tile(sp.diag(D),(N,1)).T)-D)
-		D = D - sp.diag(sp.diag(D)) + sp.diag(Y[N-1,:])
-		DM[:,:,ell] = D
+    for ell in range(0,M):
+        Y = np.cumsum(np.vstack((B[ell,:], (ell+1.)*Y[0:N-1,:]*X)) , axis=0,dtype=float)
+        D = (ell+1.)*Z*(C*(np.tile(np.diag(D),(N,1)).T)-D)
+        D = D - np.diag(np.diag(D)) + np.diag(Y[N-1,:])
+        DM[:,:,ell] = D
+
+    return DM
 	
-	return DM
 	
 	
-	
-def clencurt(n1):
-  """ Computes the Clenshaw Curtis weights """
-  if n1 == 1:
-    x = 0
-    w = 2
-  else:
-    n = n1 - 1
-    C = sp.zeros((n1,2),dtype=np.float)
-    k = 2*(1+sp.arange(int(sp.floor(n/2))))
-    C[::2,0] = 2/sp.hstack((1., 1.-k*k))
-    C[1,1] = -n
-    V = sp.vstack((C,sp.flipud(C[1:n,:])))
-    F = sp.real(ifft(V, n=None, axis=0))
-    x = F[0:n1,1]
-    w = sp.hstack((F[0,0],2*F[1:n,0],F[n,0]))
-  return w
+def clencurt(N):
+    """ w = clencurt(N): Computes the Clenshaw Curtis weights on Chebyshev nodes
+    Inputs:
+        N:  Number of Chebyshev collocation nodes
+    Outputs:
+        w:  1-d numpy array of weights
+    To integrate a function, given as a 1-d array of values 'f' on 'N' Chebyshev nodes 'y', 
+        f_int = np.dot(w,f)"""
+    n1 = N
+    if n1 == 1:
+        x = 0
+        w = 2
+    else:
+        n = n1 - 1
+        C = np.zeros((n1,2),dtype=np.float)
+        k = 2*(1+np.arange(int(np.floor(n/2))))
+        C[::2,0] = 2/np.hstack((1., 1.-k*k))
+        C[1,1] = -n
+        V = np.vstack((C,np.flipud(C[1:n,:])))
+        F = np.real(ifft(V, n=None, axis=0))
+        x = F[0:n1,1]
+        w = np.hstack((F[0,0],2*F[1:n,0],F[n,0]))
+    return w
 
-
-def chebnorm(vec,N):
-	vect = sp.asarray(vec)
-	vect = vect.reshape((vect.size,1))
-	wvec = clencurt(N)
-	wvec = wvec.reshape((1,N))
-	
-	repN = vect.size//N
-	
-	return sp.sqrt(  abs(sp.dot( sp.tile(wvec,(1,repN)), vect.conjugate()*vect ))[0,0]   )
-
-# Clencurt-weighted norm on internal Chebyshev collocation nodes- i.e., excluding 1,-1
-def chebnorm_int(vec,N):
-   m = vec.size/(N-2)
-   vect = sp.asarray(vec).reshape((m,N-2))
-   wvec = clencurt(N)
-   wvec = wvec[1:N-1]
-
-   return sp.sqrt( abs(  sp.sum(sp.dot( vect*vect.conjugate(),wvec )) ))
-
-def chebdotvec(vec1,vec2,N):
+def _chebdotvec(arr1,arr2,N):
     # This function computes inner products of vectors ONLY.
-    if (vec1.ndim != 1) or (vec2.ndim != 1) or (not isinstance(N,int)):
-        raise RuntimeError("chebdotvec only accepts vector arguments, and integer 'N'")
+    assert (arr1.ndim == 1) and (arr2.ndim == 1), "For dot products of non-1d-arrays, use chebdot()"
 
-    if (vec1.size % N != 0) or (vec2.size % N != 0) or (vec1.size != vec2.size):
-        raise RuntimeError("Vector sizes not consistent with each other or with 'N'")
+    prod = (np.array(arr1) * np.array(arr2).conjugate() )
+    prod = prod.reshape((arr1.size//N, N))
+    wvec = clencurt(N).reshape((1,N))
 
-    wvec = clencurt(N)
-    res = 0.
-    wvec = sp.tile(wvec,(vec1.size/N,))
+    return 0.5* np.sum( (prod*wvec).flatten() )
 
-    return sp.dot(wvec, vec1.conjugate()*vec2)
 
-def chebdotvec_int(vec1,vec2,N):
-    m = vec1.size/(N-2)
-    wvec = clencurt(N)
-    wvec = wvec[1:N-1]
-    vec1t = vec1.reshape((m,N-2))
-    vec2t = vec2.reshape((m,N-2))
+def chebnorm(arr,N):
+    """ norm2 = chebnorm(arr,N): Returns 2-norm of array 'arr', weighted by clencurt weights (see clencurt(N)) 
+    Inputs:
+        arr:    np.ndarray whose size is an integral multiple of N
+                    Can be multi-dimensional.
+        N:      Number of Chebyshev collocation nodes
+    Outputs:
+        norm:   2-norm, weighted by clenshaw-curtis weights."""
+    return np.sqrt(np.abs(_chebdotvec(arr.flatten(),arr.flatten(),N) ))
 
-    return sp.sum( sp.dot( vec1t*vec2t.conjugate(), wvec ))
 
 def chebdot(arr1,arr2,N):
+    """ dotArr = chebdot(arr1, arr2, N): Dot products on Chebyshev nodes using clencurt weights
+    Inputs:
+        arr1: np.ndarray (possibly 2-d) whose size is an integral multiple of N
+        arr2: np.ndarray (possibly 2-d) whose size is an integral multiple of N
+            arr1 and arr2 must have same size in their last axis
+    Outputs:
+        dotArr : float of dot product if arr1 and arr2 are 1d
+                 2-d array otherwise
+        """
+    if (arr1.ndim==1) and (arr2.ndim == 1): return _chebdotvec(arr1,arr2,N)
+    # Nothing special to be done if both are 1d arrays
+
     # The arguments arr1 and arr2 can either be vectors or matrices
-    if (arr1.ndim ==1) and (arr2.ndim == 1):
-        return chebdotvec(arr1,arr2,N)
+    if (arr1.ndim ==1):
+        arr1 = arr1.reshape((1,arr1.size))
+    if (arr2.ndim ==1):
+        arr2 = arr2.reshape((1,arr2.size))
+    dotArr = np.zeros((arr1.shape[0], arr2.shape[0]))
+    for ind1 in range(arr1.shape[0]):
+        for ind2 in range(arr2.shape[0]):
+            dotArr[ind1,ind2] = _chebdotvec(arr1[ind1],arr2[ind1],N)
+    
+    return dotArr 
 
-
-    if (arr1.ndim == 2) and (arr2.ndim == 1):
-        l = arr1.shape[0]
-        dot_prod = sp.zeros(l)
-        for k in range(0,l):
-            dot_prod[k] = chebdotvec(arr1[k],arr2,N)
-
-    elif (arr1.ndim == 1) and (arr2.ndim == 2):
-        l = arr2.shape[0]
-        dot_prod = sp.zeros(l)
-        for k in range(0,l):
-            dot_prod[k] = chebdotvec(arr1,arr2[k],N)
-
-    elif (arr1.ndim == 2) and (arr2.ndim ==2):
-        l1 = arr1.shape[0]
-        l2 = arr2.shape[0]
-        dot_prod = sp.zeros((l1,l2))
-        for k1 in range(0,l1):
-            for k2 in range(0,l2):
-                dot_prod[k1,k2] = chebdotvec(arr1[k1],arr2[k2],N)
-
-    else:
-        raise RuntimeError("Input arguments are neither vectors nor 2D matrices")
-
-    return dot_prod
-
-def chebnorm1(vec,N):
-	vect = sp.asarray(vec)
-	vect = vect.reshape((vect.size,1))
-	wvec = clencurt(N)
-	wvec = wvec.reshape((1,N))
-	
-	repN = vect.size/N
-	
-	return abs(sp.dot( sp.tile(wvec,(1,repN)), abs(vect) ))[0,0]   
-
-def chebnorm1_int(vec,N):
-   m = vec.size/(N-2)
-   vect = sp.asarray(vec).reshape((m,N-2))
-   wvec = clencurt(N)
-   wvec = wvec[1:N-1]
-
-   return abs(  sp.sum(sp.dot( abs(vect),wvec )) )   
+def chebnorm1(arr,N):
+    """ norm1 = chebnorm(arr,N): Returns 1-norm of array 'arr', weighted by clencurt weights (see clencurt(N)) 
+    Inputs:
+        arr:    np.ndarray whose size is an integral multiple of N
+                    Can be multi-dimensional.
+        N:      Number of Chebyshev collocation nodes
+    Outputs:
+        norm:   1-norm, weighted by clenshaw-curtis weights."""
+    return _chebdotvec( np.abs(arr.flatten())   , np.ones(arr.size) , N) 
 
 def chebnorm2(vec,N):
-	return chebnorm(vec,N)
+    """ norm2 = chebnorm(arr,N): Returns 2-norm of array 'arr', weighted by clencurt weights (see clencurt(N)) 
+    Inputs:
+        arr:    np.ndarray whose size is an integral multiple of N
+                    If multi-dimensional, arr is flattened.
+                    If size > N, each 'N' elements are normed individually, and their total is added.
+        N:      Number of Chebyshev collocation nodes
+    Outputs:
+        norm:   2-norm, weighted by clenshaw-curtis weights."""
+    return chebnorm(vec,N)
 
-def chebnorm2_int(vec,N):
-    return chebnorm_int(vec,N)
-# Given function values at Cheb collocation nodes, returns the
-# coefficients of Chebyshev polynomials of the 1st kind
+def _chebcoeffsvec(f):
+    f = f.flatten()
+    a =  np.fft(np.append(f,f[N-2:0:-1]))  
+    a = a[:N]/(N-1.)*np.concatenate(([0.5],np.ones(N-2),[0.5]))
+    return a
+
+
 def chebcoeffs(f):
-	if f.ndim != 1:
-		raise RuntimeError("Input is not a 1-D array")
-		
-	N = f.size
-	a = sp.fft(sp.append(f,f[N-2:0:-1]))
-	 
-	a = a[:N]/(N-1.)*sp.concatenate(([0.5],sp.ones(N-2),[0.5]))
+    """coeffs = chebcoeffs(f): Coefficients of Chebyshev polynomials (first kind) for given collocated values.
+    Inputs:
+        f: Function values on 'N' Chebyshev nodes (N= f.size if f is 1d)
+            Can be multi-dimensional
+            If f is multidimensional, the last axis size is taken as N
+    Outputs:
+        coeffs: Array of coefficients of Chebyshev polynomials (first kind) from 0 to N-1""" 
+    if (f.ndim == 1):
+        return _chebcoeffsvec(f)
+    
+    shape = f.shape
+    N= f.shape[-1]
+    f = f.reshape((f.size//N, N))
+
+    coeffArr = f.copy()
+    for ind in range(f.shape[0]):
+        coeffArr[ind] = _chebcoeffsvec(f[ind])
+    coeffArr = coeffArr.reshape(shape)
+
+    return coeffArr
+
+
+def _chebcoll_vec_vec(a):
+    a = a.flatten()
+    
+    N = a.size
+    a = a*(N-1.)/np.concatenate(([0.5],np.ones(N-2),[0.5]))
+
+    f = np.ifft(np.append(a,a[N-2:0:-1]))
+    
+    return f[:N]
 	
-	return a
-
-
-
 def chebcoll_vec(a):
-	if a.ndim !=1:
-		raise RuntimeError("Input is not a 1-D array")
-	
-	N = a.size
-	a = a*(N-1.)/sp.concatenate(([0.5],sp.ones(N-2),[0.5]))
+    """coll = chebcoll_vec(f): Function values on Chebyshev nodes, given coefficients of Chebyshev polynomials (first kind).
+    Inputs:
+        a: N Chebyshev polynomial coefficients (N= a.size if a is 1d)
+            Can be multi-dimensional
+            If a is multidimensional, the last axis size is taken as N
+    Outputs:
+        coeffs: Array of function values on Chebyshev nodes, same shape as 'a' """ 
+    if (a.ndim == 1):
+        return _chebcoll_vec_vec(a)
+    
+    shape = a.shape
+    N= a.shape[-1]
+    a = a.reshape((a.size//N, N))
 
-	f = sp.ifft(sp.append(a,a[N-2:0:-1]))
-	
-	return f[:N]
-	
-	
-
-
-def presdif(N):
-	x = chebdif(N,1)[0]
-	D1 = poldif(x[1:N-1],1)
-	D1=D1[:,:,0]
-	
-	return D1
-
-
-
-def chebdifBL(N,Y):
-	eta,DM = chebdif(2*N,2)
-	x = -Y*sp.log(eta[:N])
-	
-	D1 = (-1./Y)*eta[:N].reshape((N,1))*DM[0:N,0:N,0]
-	D2 = (1./Y/Y)*(eta[:N].reshape((N,1))*DM[0:N,0:N,0] + (eta[0:N].reshape((N,1))**2)*DM[0:N,0:N,1])
-
-	return x,D1,D2
+    f = a.copy()
+    for ind in range(a.shape[0]):
+        f[ind] = _chebcoll_vec_vec(a[ind])
+    f = f.reshape(shape)
+    return f
 
 
-def presdifBL(N,Y):
-	eta,DM = chebdif(2*N,2)
-	Dpeta = poldif(eta[1:2*N-1],1)
-	
-	Dp = (-1./Y)*eta[1:N]*Dpeta[0:N-1,0:N-1,0]
-	
-	return Dp
 
-
-def chebint (fk, x):
-    speps = sp.finfo(float).eps # this is the machine epsilon
-    N = sp.size(fk)
-    M = sp.size(x)
-    xk = sp.sin(sp.pi*sp.arange(N-1,1-N-1,-2)/(2*(N-1)))
-    w = sp.ones (N)*(-1)**(sp.arange(0,N))
+def chebint(fk, x):
+    """ interp = chebint(fk,x): Interpolate function 'fk' from Chebyshev nodes to 'x'
+    Inputs:
+        fk: Function values on 'N' Chebyshev nodes, N = fk.size
+        x:  Nodes on which f has to be interpolated (in [1,-1])
+    Outputs:
+        interp: Function values on x
+    """
+    assert fk.ndim == 1
+    speps = np.finfo(float).eps # this is the machine epsilon
+    N = np.size(fk)
+    M = np.size(x)
+    xk = np.sin(np.pi*np.arange(N-1,1-N-1,-2)/(2*(N-1)))
+    w = np.ones(N) * (-1)**(np.arange(0,N))
     w[0] = w[0]/2
     w[N-1] = w[N-1]/2
-    D = sp.transpose(sp.tile(x,(N,1)))-sp.tile(xk,(M,1))
+    D = np.transpose(np.tile(x,(N,1))) - np.tile(xk,(M,1))
     D = 1/(D+speps*(D==0))
-    p = sp.dot(D,(w*fk))/(sp.dot(D,w))
+    p = np.dot(D,(w*fk))/(np.dot(D,w))
     return p
-
-def chebintegrate(v):
-    ''' Integrates 'v' over Chebyshev nodes, assuming v(y=-1) (or, v[-1]) = 0'''
-
+    
+def _chebintegratevec(v):
+    assert v.ndim == 1
     coeffs = chebcoeffs(v)
-    int_coeffs = sp.zeros(v.size, dtype=coeffs.dtype)
+    int_coeffs = np.zeros(v.size, dtype=coeffs.dtype)
     N = v.size
 
     # T_0 = 1,  T_1 = x, T_2 = 2x^2 -1
@@ -331,9 +341,31 @@ def chebintegrate(v):
     int_coeffs[0] += 0.25*coeffs[1]
 
     # \int T_n dx = 0.5*[T_{n+1}/(n+1) - T_{n-1}/(n-1)]
-    nvec = sp.arange(0,N)
+    nvec = np.arange(0,N)
     int_coeffs[3:] += 0.5/nvec[3:]*coeffs[2:N-1]
     int_coeffs[1:N-1] -= 0.5/nvec[1:N-1]*coeffs[2:]
 
     int_coll_vec = chebcoll_vec(int_coeffs)
     return int_coll_vec - int_coll_vec[-1]
+
+def chebintegrate(v):
+    """ int_coll_vec = chebintegrate(v): Integral of function 'v', supposing BC v(y=-1) = 0
+    Inputs: 
+        v:  Function values on Chebyshev grid with N=v.size points if v is 1d
+            If v is multi-dimensional, N = v.shape[-1], and integration is performed on all other axes
+    Outputs:
+        int_coll_vec: Integral of v, supposing BC v(y=-1) = 0
+                        same shape as v""" 
+    if v.ndim == 1:
+        return _chebintegratevec(v)
+    
+    shape = v.shape
+    N = v.shape[-1]
+
+    v = v.reshape((v.size//N, N))
+    integral = v.copy()
+    for ind in range(v.shape[0]):
+        integral[ind] = _chebintegratevec(v[ind])
+    
+    return integral.reshape(shape)
+

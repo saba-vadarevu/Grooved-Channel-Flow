@@ -287,9 +287,9 @@ class flowFieldWavy(flowField):
     Adds an extra attribute "eps" as a key in flowDict
     
     Overloads methods for differentiation: ddx, ddx2,ddy,..., along with .printCSV()'''
-    def __new__(cls,arr=None,flowDict=None,dictFile=None):
+    def __new__(cls,arr=None,flowDict=None):
         #obj = flowField.__new__(flowFieldWavy,arr=arr,flowDict=flowDict,dictFile=dictFile)
-        obj = flowField.__new__(cls,arr=arr,flowDict=flowDict,dictFile=dictFile)
+        obj = flowField.__new__(cls,arr=arr,flowDict=flowDict)
         if 'eps' not in obj.flowDict:
             warn('flowFieldWavy object does not have key "eps" in its dictionary. Setting "eps" to zero')
             obj.flowDict['eps'] = 0.
@@ -558,12 +558,15 @@ class flowFieldWavy(flowField):
         else: Lnew = L
         if M != 0: Mnew = M+5
         else: Mnew = M
-        vf = self.slice(L=Lnew, M=Mnew)
-        if pField is None:
-            pField = vf.getScalar().zero()
+        self = self.slice(L=Lnew, M=Mnew)
+        vf = self.slice(nd=[0,1,2])
+        if self.nd==4:
+            pField = self.getScalar(nd=3)
+        elif pField is None:
+            pField = self.getScalar().zero()
         else:
             pField = pField.slice(L=Lnew,M=Mnew)
-        res = flowField.residuals(vf, pField=pField, **kwargs)
+        res = flowField.residuals(self,pField=pField, **kwargs)
 
         return res.slice(L=L,M=M)
    
@@ -656,7 +659,7 @@ class flowFieldWavy(flowField):
 
 
    
-def weighted2ff(flowDict=None,arr=None,weights=None):
+def weighted2ff(flowDict=None,arr=None,weights=None,cls='wavy'):
     """ Converts 1-d np.ndarray into flowFieldWavy object
     Inputs:
         Non-optional: flowDict, arr
@@ -673,7 +676,13 @@ def weighted2ff(flowDict=None,arr=None,weights=None):
     invRootWeights = (np.sqrt(1./weights)).reshape((1,N))
     deweightedArr =  invRootWeights * (arr.reshape(arr.size//N, N))
 
-    return flowFieldWavy(flowDict=flowDict, arr= deweightedArr.reshape(arr.size) ) 
+    if (cls == 'wavy') or (cls == 'flowFieldWavy'):
+        return flowFieldWavy(flowDict=flowDict, arr= deweightedArr.flatten() ) 
+    elif (cls == 'riblet') or (cls == 'flowFieldRiblet'):
+        return flowFieldRiblet(flowDict=flowDict, arr= deweightedArr.flatten() ) 
+    else:
+        raise RuntimeError('cls must be either wavy or riblet or flowFieldWavy or flowFieldRiblet')
+
 
 class flowFieldRiblet(flowFieldWavy):
     """Subclass of flowFieldWavy
@@ -691,9 +700,8 @@ class flowFieldRiblet(flowFieldWavy):
     The amplitudes of the Fourier modes are supplied as a numpy array 'epsArr' that is part of 
         flowDict
     If epsArr is not present in flowDict, it is created from flowDict['eps']"""
-    def __new__(cls,arr=None,flowDict=None,dictFile=None):
-        #obj = flowField.__new__(flowFieldWavy,arr=arr,flowDict=flowDict,dictFile=dictFile)
-        obj = flowFieldWavy.__new__(cls,arr=arr,flowDict=flowDict,dictFile=dictFile)
+    def __new__(cls,arr=None,flowDict=None):
+        obj = flowFieldWavy.__new__(cls,arr=arr,flowDict=flowDict)
         if 'eps' not in obj.flowDict:
             warn('flowFieldWavy object does not have key "eps" in its dictionary. Setting "eps" to zero')
             obj.flowDict['eps'] = 0.

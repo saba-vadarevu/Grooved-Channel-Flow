@@ -1,22 +1,35 @@
+"""
+flowField.py
+Defines a class (inheriting numpy.ndarray) for plane channel and Couette flows
+    Discretization is Fourier, Fourier, Chebyshev (collocation), Fourier in t,x,y,z
+Class instances have shape (nt, nx, nz, nd, N) for t,x,z, components, y
+    For Fourier discretization, a rectangular domain is used and positive and negative 
+        mode coefficients are stored, as -K,...,-1,0,1,...K for time with nt=2K+1, 
+        similarly for x and z
+Class attributes are:
+    flowDict, nt, nx, nz, N, nd, y, D, D2
+Class methods are:
+
+
+
+"""
+
 """ #####################################################
-Author : Sabarish Vadarevu
-Affiliation: Aerodynamics and Flight Mechanics group, University of Southampton.
-
-
-non-class functions:
-getDefaultDict(), verify_dict(), read_dictFile()
+Sabarish Vadarevu
+Aerodynamics and Flight Mechanics group 
+University of Southampton, United Kingdom
 """
 
 import numpy as np
 import scipy as sp
 #from scipy.linalg import norm
 from warnings import warn
-from pseudo import chebdif, clencurt, chebintegrate, chebint, chebnorm
+from pseudo import chebdif, clencurt, chebintegrate, chebint, chebdot, chebnorm
 
 #from pseudo.py import chebint
 
 defaultDict = {'alpha':1.14, 'beta' : 2.5, 'omega':0.0, 'L': 23, 'M': 23, 'nd':3,'N': 35, 'K':0,
-               'Re': 400.0, 'isPois':0.0, 'noise':0.0 , 'lOffset':0.0, 'mOffset':0.0}
+               'Re': 400.0, 'isPois':0.0,'lOffset':0.0, 'mOffset':0.0}
 
 divTol = 1.0e-06
 pCorrTol = 1.0e-04
@@ -62,76 +75,67 @@ def read_dictFile(dictFile):
 
 class flowField(np.ndarray):
     """
-    This module provides a class to define u,v,w (or scalars such as pressure) in 4D: t, x,z,y. 
+    This module provides a class to define u,v,w (or scalars such as pressure) in 4D: t,x,z,y. 
     The shape of a class instance is (nt,nx,nz,nd,N): nt,nx,nz are harmonics (in omega, alpha,beta) 
         of Fourier modes in t,x,z respectively.
+        Fourier modes for t go from -K,..,0,..,K, with nt=2K+1, similarly for x and z.
     nd is the number of components, 3 for [u,v,w]. 
     Scalars and non-3d fields can be created by setting 'nd' appropriately (nd=1 for scalars).
     N refers to Chebyshev collocation nodes
 
     Class attributes:
-        self:   flowField instance of shape (nt,nx,nz,nd,N), inherits np.ndarray
         nt, nx, nz : length of axes 0,1, and 2 respectively
         nd:     Number of components of vector field. =1 for scalars. Length of axis 3
         N:      Number of Chebyshev collocation nodes.
         y:      Chebyshev collocation grid, because there's way too many calls being made to chebdif
         D,D2:   Chebyshev differentiation matrices, same reason as above   
-        lOffset:When non-zero, indicates that the streamwise modes are not harmonics of 
-                    fundamental frequency (alpha) but are offset from harmonics by a constant `lOffset`
-        mOffset:Same as lOffset, for spanwise modes
-        flowDict: 
-            defaultDict = {'alpha':1.14, 'beta' : 2.5, 'omega':0.0, 'L': 23, 'M': 23, 'nd':3,'N': 35, 'K':0,
-                   'Re': 400.0, 'isPois':0.0, 'noise':0.0 }
-            'noise' is currently not implemented, but will later be used to initialize "random" flowField instances
+        flowDict:  Dictionary that defines flow geometry and conditions.
+            (default): {'alpha':1.14, 'beta' : 2.5, 'omega':0.0, 'L': 23, 'M': 23, 'nd':3,'N': 35, 'K':0,
+                   'Re': 400.0, 'isPois':0.0}
 
-
-    Methods (names only. See doc-strings for methods for template): 
-        verify, view1d, view4d 
+    Methods: 
+        verify 
         slice, getScalar, appendField, copyArray
         real, imag, conjugate, abs
-        ddt, ddx, ddx2, ddz, ddz2, ddy, ddy2, intX, intY, intZ
-        grad3d, grad2d, grad, div, laplacian, curl3d, curl
-        convLinear, convNL, convSemiLinear
-        dot, sumAll, norm
-        residuals, solvePressure
-        ifft, getPhysical, makePhysical, makePhysicalPlanar
+        ddt, ddx, ddx2, ddz, ddz2, ddy, ddy2 
+        (untested:) intX, intY, intZ
+        grad, div, laplacian, curl, convNL, residuals, solvePressure (incomplete)
+        dot, norm, weighted
+        flux, dissipation, energy, powerInput
+        direcDeriv, ifft, getPhysical, makePhysical, makePhysicalPlanar
+        identity, zero, translateField, shiftPhase, reflectZ, rotateZ, pointwiseInvert, checkSymms, imposeSymms
 
-    It must always be ensured that the dictionary, self.flowDict, is always consistent with the flowField instance.
+    It must always be ensured that the dictionary, self.flowDict, is consistent with the flowField instance.
     Unless one is absolutely sure that the dictionary attributes don't need to be changed, 
-        the arrays should not be accessed directly. Either the methods must be used. 
+        the arrays should not be accessed directly- the methods must be used. 
         For cases when a method isn't appropriate, the dictionary must be appropriately modified.
 
     self.verify() ensures that at least the shape attributes are self-consistent. 
-    alpha, beta, omega, Re are not verified with self.verify()
+    alpha, beta, omega, Re cannot be verified with self.verify()
 
     Initialization:
-        flowField() creates an instance using a default dictionary: a 3 component zero-vector of shape (1,47,24,3,35).
+        flowField() creates an instance using a default dictionary: a 3 component zero-vector of shape (1,47,24,3,35) for Couette flow.
         flowField(flowDict=dictName) creates an instance with shape attributes as defined in the dictionary.
             If the dictionary does not have all the keys needed, an assertion error is printed
-        flowField(dictFile='flowConfig.txt') creates an instance using the attributes defined in the file flowConfig.txt
-            The file flowConfig.txt has its lines formatted to facilitate being read by a function in this module. DO NOT EDIT IT except for the values
         flowField(arr=initArr, flowDict=dictName)
             Unless an array is passed using the keyword 'arr', the instance is initialized with zeros
 
-    All three arguments can be used to provide a dictionary (arr can be an instance of flowField).
-    flowDict argument has highest priority in defining the dictionary, 
-        followed by dictFile
-        followed by arr.flowDict (when arr is an instance of flowField or its subclass)
+    flowDict can be supplied either as a keyword argument or as an attribute of the argument 'arr'
+    flowDict keyword argument has higher priority in defining the dictionary than arr.flowDict
+    
     If none of the above arguments provide a flowDict, a default dictionary (defined in the module) is used.
     A warning message is printed when the default dictionary is used.
             
     """
-    def __new__(cls, arr=None, flowDict=None, dictFile= None):
-        """Creates a new instance of flowField class with arguments (arr=None,flowDict=None,dictFile=None)
+    def __new__(cls, arr=None, flowDict=None):
+        """Creates a new instance of flowField class with arguments (cls, arr=None,flowDict=None,dictFile=None)
+        cls argument can be used to initialize subclasses of flowField: flowFieldWavy or flowFieldRiblet
         """
         if flowDict is None:
-            if dictFile is None:
-                if hasattr(arr,'flowDict'):
-                    flowDict = verify_dict(arr.flowDict)
-                else:
-                    flowDict=verify_dict(flowDict)
+            if hasattr(arr,'flowDict'):
+                flowDict = verify_dict(arr.flowDict)
             else:
-                flowDict = verify_dict(read_dictFile(dictFile))
+                flowDict= defaultDict
         else:
             flowDict = verify_dict(flowDict)
         
@@ -147,9 +151,8 @@ class flowField(np.ndarray):
         if arr is None:
             arr=np.zeros(nt*nx*nz*nd*N,dtype=np.complex)
         else:
-            if arr.size != (nx*nz*nt*nd*N):
-                raise RuntimeError('The parameters in the dictionary are not consistent with the size of the supplied array')
-            if arr.dtype == np.float or (arr.dtype == np.float64):
+            assert arr.size == (nx*nz*nt*nd*N),'The parameters in the dictionary are not consistent with the size of the supplied array'
+            if (arr.dtype == np.float) or (arr.dtype == np.float64):
                 arr = (arr+1.j*np.zeros(arr.shape))
         obj = np.ndarray.__new__(cls,shape=(nt,nx,nz,nd,N),dtype=np.complex,buffer=arr.copy())
         
@@ -167,9 +170,6 @@ class flowField(np.ndarray):
         
     
     def __array_finalize__(self,obj):
-        # if self.dtype != np.complex:
-            # warn('flowField class is designed to work with complex array entries\n'+
-                 # 'To obtain real/imaginary parts of an instance, use class methods "real()" and "imag()"')
         if obj is None: return
          
         self.flowDict = getattr(self,'flowDict',obj.flowDict.copy())
@@ -185,24 +185,20 @@ class flowField(np.ndarray):
 
     
     def verify(self):
-        """Ensures that the size of the class array is consistent with the dictionary entries. 
+        """Ensures that the size of the class array is consistent with dictionary entries. 
         Use this when writing new methods or tests"""
-        self.flowDict = verify_dict(self.flowDict)  # Check that all keys exist
+        self.flowDict = verify_dict(self.flowDict)  
+        # Check that all keys exist, and cast shape-related keys to int
+
         # Next, check that the values in the dictionary match the class attributes
-        if not ((self.nt == 2*self.flowDict['K']+1) and (self.nx == 2*self.flowDict['L']+1) and (self.nz == 2*self.flowDict['M']+1) and
-                (self.N == self.flowDict['N']) and (self.nd == self.flowDict['nd'])   ): 
-            raise RuntimeError('The shape attributes of the flowField instance are not consistent with dictionary entries')
+        assert ((self.nt == 2*self.flowDict['K']+1) and (self.nx == 2*self.flowDict['L']+1) and (self.nz == 2*self.flowDict['M']+1) and
+                (self.N == self.flowDict['N']) and (self.nd == self.flowDict['nd'])   ) 
         assert self.size == self.nt*self.nx*self.nz*self.nd*self.N, 'The size of the flowField array is not consistent with its shape attributes'
         return
-        
-        
-    def view1d(self):
-        """ Returns a 1d view. 
-        Don't try to figure out what the ordering is, just use self.view4d() to get an organized view"""
-        return self.reshape(self.size)
     
     def view4d(self):
-        """ Returns a 4d view (actually, a 5-D array): (omega, alpha, beta, field=u,v,w,p, N)"""
+        """ Returns a 4d view (actually, a 5-D array): (omega, alpha, beta, field=u,v,w,p, N)
+        This must be the default view. In case the shape is messed up, call this method."""
         return self.reshape((self.nt,self.nx,self.nz,self.nd,self.N))
 
     def slice(self,K=None,L=None,M=None,nd=None,N=None,flowDict=None):
@@ -282,25 +278,29 @@ class flowField(np.ndarray):
         return obj.view4d()
     
     def getScalar(self,nd=0):
-        """Returns the field Variable in the flowField instance identified by the argument "nd".
-        Default for "nd" is 0, the first scalar in the flowField (u)"""
-        if type(nd) != int:
-            raise RuntimeError('getScalar(nd=0) only accepts integer arguments')
-        obj = self.view4d()[:,:,:,nd:nd+1].copy()
+        """Returns the field variable in the flowField instance identified by the keyword argument "nd".
+        Inputs: 
+            self (class instance)
+            nd: (int) Component axis index. Default: 0
+        Outputs:
+            ff: flowField subinstance with nd=1
+        """
+        obj = self[:,:,:,nd:nd+1].copy()
         obj.flowDict['nd'] = 1
         obj.nd = 1
-        return obj.view4d()
+        return obj
 
     def appendField(self,*args):
-        """Append one or more fields at the end of "self". To append "p" to "uVec", call as uVec.appendField(p)
+        """Append one or more fields at the end of "self". 
+        To append "p" and "q" to "uVec", call as uVec.appendField(p,q)
         Note: Both uVec and p must be flowField objects, each with their flowDict"""
         tempDict = self.flowDict.copy()
-        v1 = self.view4d().copyArray()
+        v1 = self.copyArray()
         for obj in args:
             if not ( (self.nt==obj.nt) and (self.nx==obj.nx) and (self.nz==obj.nz) and (self.N==obj.N)):
                 obj = obj.slice(K = self.flowDict['K'],L = self.flowDict['L'],M = self.flowDict['M'],N = self.flowDict['N'])
                 warn('obj did not have the same shape as self, obj has been sliced to match shapes')
-            v2 = obj.view4d().copyArray()
+            v2 = obj.copyArray()
             v1=np.append(v1,v2,axis=3)
             tempDict['nd'] += obj.flowDict['nd']
         return flowField.__new__(self.__class__,arr=v1, flowDict=tempDict).view4d()
@@ -329,60 +329,56 @@ class flowField(np.ndarray):
     
     def ddt(self):
         """ Returns a flowField instance that gives the partial derivative along "t" """
-        partialT = self.view4d().copy()
         kArr = np.arange(-self.flowDict['K'],self.flowDict['K']+1).reshape(self.nt,1,1,1,1)
-        partialT[:] = -1.j*self.flowDict['omega']*kArr*partialT # Fourier modes are e^(i(ax+bz-wt))
+        partialT = -1.j * self.flowDict['omega'] * kArr * self  # Fourier modes are e^(i(lax+mbz-kwt))
         return partialT
     
     def ddx(self):
         """ Returns a flowField instance that gives the partial derivative along "x" """
         lArr = (self.flowDict['lOffset']+np.arange(-self.flowDict['L'],self.flowDict['L']+1)).reshape(1,self.nx,1,1,1)
-        partialX = 1.j*self.flowDict['alpha']*lArr*self.view4d().copy()
+        partialX = 1.j * self.flowDict['alpha'] * lArr * self
         return partialX
     
     def ddx2(self):
         """ Returns a flowField instance that gives the second partial derivative along "x" """
-        partialX2 = self.view4d().copy()
         l2Arr = ((self.flowDict['lOffset']+np.arange(-self.flowDict['L'],self.flowDict['L']+1))**2).reshape(1,self.nx,1,1,1)
-        partialX2[:] = -self.flowDict['alpha']**2*l2Arr*partialX2
+        partialX2 = -(self.flowDict['alpha']**2) * l2Arr * self
         return partialX2
     
     def ddz(self):
         """ Returns a flowField instance that gives the partial derivative along "z" """
-        partialZ = self.view4d().copy()
-        M = self.flowDict['M']
         mArr = (self.flowDict['mOffset']+np.arange(-self.flowDict['M'],self.flowDict['M']+1 )).reshape((1,1,self.nz,1,1))
-        partialZ[:] = 1.j*self.flowDict['beta']*mArr*partialZ
+        partialZ = 1.j * self.flowDict['beta'] * mArr * self
         return partialZ
     
     def ddz2(self):
         """ Returns a flowField instance that gives the second partial derivative along "z" """
-        partialZ2 = self.view4d().copy()
         mArr = (self.flowDict['mOffset']+np.arange(-self.flowDict['M'],self.flowDict['M']+1  )).reshape((1,1,self.nz,1,1))
         m2Arr = mArr**2
-        partialZ2[:] = -self.flowDict['beta']**2*m2Arr*partialZ2
+        partialZ2 = -(self.flowDict['beta']**2) * m2Arr * self 
         return partialZ2
     
     def ddy(self):
         """ Returns a flowField instance that gives the partial derivative along "y" """
         N = self.N
-        partialY = self.view1d().copy()
+        partialY = self.copy()
         tempArr = self.reshape(self.size//N,N)
-        partialY[:] = np.dot(tempArr,self.D.T).reshape(self.size)
-        return partialY.view4d()
+        partialY[:] = np.dot(tempArr,self.D.T).reshape(partialY.shape)
+        return partialY
     
     def ddy2(self):
-        """ Returns a flowField instance that gives the partial derivative along "y" """
+        """ Returns a flowField instance that gives the second partial derivative along "y" """
         N = self.N
-        partialY2 = self.view1d().copy()
+        partialY2 = self.copy()
         tempArr = self.reshape(self.size//N,N)
-        partialY2[:] = np.dot(tempArr,self.D2.T).reshape(self.size)
-        return partialY2.view4d()
+        partialY2[:] = np.dot(tempArr,self.D2.T).reshape(partialY2.shape)
+        return partialY2
     
     def intX(self):
         """ Integrate each Fourier mode of each scalar along streamwise 
         Returns a flowField object of the same size of self.
-        The constant of integration is decided so that at x=0, the integral is 0 (i.e., starting integration from x=0)"""
+        The constant of integration is decided so that at x=0, the integral is 0 (i.e., starting integration from x=0)
+        NOTE: This method isn't tested"""
         # f(x,y,z) = \sum_l \sum_m  c_lm(y) exp(ilax) exp(imbz)
         # \int f(x,y,z) dx = \sum_l \sum_m  c_lm(y) exp(imbz) [\int exp(ilax) dx ]
         # For l != 0, \int exp(ilax) dx = 1/ila  exp(ilax) - 1/ila
@@ -472,8 +468,46 @@ class flowField(np.ndarray):
         integral.verify()
         return integral.view4d()
     
+    
+    def grad(self, nd=0):
+        """ Computes gradient (in 3d by default) of either a scalar flowField object, 
+            or of one variable (identified by nd) in a vector flowField object (default is first variable in object). 
+            """
+        scal = self.getScalar(nd=nd)        # Extract the scalar field whose gradient is to be calculated
+        gradVec = scal.ddx().appendField(scal.ddy(),scal.ddz())
+        return gradVec
+        
+    def laplacian(self):
+        """ Computes Laplacian for a flowField instance """
+        return self.ddx2() + self.ddy2() + self.ddz2()
+            
+    def div(self):
+        """ Computes divergence of vector field as u_x+v_y+w_z
+        If a flowField with more than 3 components (nd>3) is supplied, takes first three components as u,v,w."""
+        return self.getScalar(nd=0).ddx() + self.getScalar(nd=1).ddy() + self.getScalar(nd=2).ddz()
+        
+    def curl(self):
+        """ Computes curl of vector field as [w_y-v_z, u_z - w_x, v_x - u_y]"""
+        # makeVector is defined in this module towards the end
+        return makeVector(self.getScalar(nd=2).ddy() - self.getScalar(nd=1).ddz(),\
+                         self.getScalar(nd=0).ddz() - self.getScalar(nd=2).ddx(),\
+                         self.getScalar(nd=1).ddx() - self.getScalar(nd=0).ddy())
+   
+
+    def dot(self, vec2):
+        """Computes inner product for two flowField objects, scalar or vector,
+            by integrating {self[nd=j]*vec2[nd=j].conj()} along x_j, and adding the integrals for j=1,..,self.nd.
+        Currently, only inner products of objects with identical dictionaries are supported"""
+        assert (self.shape == vec2.shape), 'Method for inner products is currently unable to handle instances with different flowDicts'
+        return chebdot(self.flatten(), vec2.flatten(), self.N)
+   
+
+    def norm(self):
+        """Integrates v[nd=j]*v[nd=j].conjugate() along x_j, sums across j=1,..,self.nd , and takes its square-root"""
+        return chebnorm(self.flatten(), self.N)
+
     def flux(self,nd=0):
-        """ Use this method to calculate volume fluxes (supposing 'self' refers to velocity vector)
+        """ Returns flux across the plane x_nd = 0  (supposing 'self' refers to velocity vector)
             Default is the streamwise volume flux (argument: nd=0) at x=0
             Pass nd=1 for wall-normal volume flux at y=0
             Pass nd=2 for spanwise volume flux at z=0
@@ -511,50 +545,6 @@ class flowField(np.ndarray):
         else: raise RuntimeError('nd must be 0,1,or 2')
         return np.real(flux)
     
-    def grad(self, nd=0):
-        """ Computes gradient (in 3d by default) of either a scalar flowField object, 
-            or of one variable (identified by nd) in a vector flowField object (default is first variable in object). 
-            """
-        scal = self.getScalar(nd=nd)        # Extract the scalar field whose gradient is to be calculated
-        gradVec = scal.ddx().appendField(scal.ddy(),scal.ddz())
-        return gradVec
-        
-    def laplacian(self):
-        """ Computes Laplacian for a flowField instance """
-        return self.ddx2() + self.ddy2() + self.ddz2()
-            
-    def div(self):
-        """ Computes divergence of vector field as u_x+v_y+w_z
-        If a flowField with more than 3 components (nd>3) is supplied, takes first three components as u,v,w."""
-        return self.getScalar(nd=0).ddx() + self.getScalar(nd=1).ddy() + self.getScalar(nd=2).ddz()
-        
-    def curl(self):
-        return makeVector(self.getScalar(nd=2).ddy() - self.getScalar(nd=1).ddz(),\
-                         self.getScalar(nd=0).ddz() - self.getScalar(nd=2).ddx(),\
-                         self.getScalar(nd=1).ddx() - self.getScalar(nd=0).ddy())
-   
-
-    def __sumAll(self):
-        """Sums all elements of a flowField object (along all axes)"""
-        obj = self.view4d().copyArray()
-        return np.sum(np.sum(np.sum(np.sum(np.sum(obj,axis=4),axis=3),axis=2),axis=1),axis=0)
-   
-
-    def dot(self, vec2):
-        """Computes inner product for two flowField objects, scalar or vector,
-            by integrating {self[nd=j]*vec2[nd=j].conj()} along x_j, and adding the integrals for j=1,..,self.nd.
-        Currently, only inner products of objects with identical dictionaries are supported"""
-        assert (self.shape == vec2.shape), 'Method for inner products is currently unable to handle instances with different flowDicts'
-        
-        w = clencurt(self.N).reshape((1,1,1,1,self.N))
-
-        return np.real((1./2.)*flowField.__sumAll(self.view4d()*vec2.conjugate().view4d()*w))
-   
-
-    def norm(self):
-        """Integrates v[nd=j]*v[nd=j].conjugate() along x_j, sums across j=1,..,self.nd , and takes its square-root"""
-        return np.sqrt(np.abs(self.dot(self)))
-
     def dissipation(self):
         """ Bulk dissipation rate, D = 1/Vol. * \int_{vol} || curl(v) ||^2  d vol
         The volume integral (per unit volume) of |curl|**2 is simply the square of the norm of the curl
@@ -574,6 +564,7 @@ class flowField(np.ndarray):
 
 
     def powerInput(self,tol=1.0e-07):
+        """ Power input to the flow through wall shear stress for Couette flow"""
 
         if self.flowDict['isPois'] != 0:
             warn("Power-input only makes sense for Couette flow. For Poiseuille flow, \
@@ -596,7 +587,7 @@ class flowField(np.ndarray):
             as one that isn't weighted, and that would ruin the calculations. 
         """ 
         q = np.sqrt(clencurt(self.N).reshape((1,1,1,1,self.N)))
-        return ((q*self.view4d()).view1d()).copyArray()
+        return ((q*self.view4d()).flatten()).copyArray()
     
     
     def convNL(self, fft=True):
