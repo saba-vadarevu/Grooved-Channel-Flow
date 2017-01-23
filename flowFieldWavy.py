@@ -682,7 +682,43 @@ def weighted2ff(flowDict=None,arr=None,weights=None,cls='wavy'):
         return flowFieldRiblet(flowDict=flowDict, arr= deweightedArr.flatten() ) 
     else:
         raise RuntimeError('cls must be either wavy or riblet or flowFieldWavy or flowFieldRiblet')
+    return
 
+def realField2ff(flowDict=None,arr=None,axis='x',weights=None,cls='wavy'):
+    """ Converts 1-d np.ndarray into flowFieldWavy object
+    Inputs:
+        Non-optional: flowDict, arr
+        Optional: weights (Clencurt weights that were used to weight the supplied array)
+    If weights are not supplied, clencurt weights are calculated using 'N' in flowDict
+    But since I wouldn't change 'N' within a GMRES, it's best to calculate the weights once
+        and to keep passing it to the method
+    """
+    assert (flowDict is not None) and (arr is not None), "Both flowDict and arr must be supplied"
+    N = flowDict['N']; L = flowDict['L']; M = flowDict['M']; nd = flowDict['nd']
+    ffArr = np.zeros((2*L+1, 2*M+1, nd, N), dtype=np.complex)
+    if weights is None:
+        weights = clencurt(N)
+
+    invRootWeights = (np.sqrt(1./weights)).reshape((1,1,1,N))
+    invRootWeights = np.tile(invRootWeights, (1,1,1,2))
+    if (axis == 'x') or (axis == 0):
+        arr = arr.reshape((L+1, 2*M+1, nd, 2*N))
+        deweightedArr =  invRootWeights * arr 
+        ffArr[:L+1] = deweightedArr[:,:,:,:N] + 1.j*deweightedArr[:,:,:,N:]
+        ffArr[:L:-1] = np.conj(ffArr[:L, ::-1])
+    else:
+        arr = arr.reshape((2*L+1, M+1, nd, 2*N))
+        deweightedArr =  invRootWeights * arr 
+        ffArr[:,:M+1] = deweightedArr[:,:,:,:N] + 1.j*deweightedArr[:,:,:,N:]
+        ffArr[:,:M:-1] = np.conj(ffArr[::-1, :M])
+
+    if (cls == 'wavy') or (cls == 'flowFieldWavy'):
+        return flowFieldWavy(flowDict=flowDict, arr= ffArr.flatten() ) 
+    elif (cls == 'riblet') or (cls == 'flowFieldRiblet'):
+        return flowFieldRiblet(flowDict=flowDict, arr= ffArr.flatten() ) 
+    else:
+        raise RuntimeError('cls must be either wavy or riblet or flowFieldWavy or flowFieldRiblet')
+    return
 
 class flowFieldRiblet(flowFieldWavy):
     """Subclass of flowFieldWavy

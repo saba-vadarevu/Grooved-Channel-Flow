@@ -1262,6 +1262,48 @@ class flowField(np.ndarray):
 
         return
 
+    def realField(self,axis='x',weighted=True,weights=None):
+        """ Returns a 1d array with real-valued elements.
+        Size-N complex-valued coefficients for mode (l,m) and (-l,-m)
+            are replaced by size-2N real-valued coefficients for mode (l,m)
+        So, the 1d array can be reshaped as (1, L+1, nz, 4, 2N) instead of (1, nx, nz, 4, N), 
+            but with real entries. 
+        The first N entries along the last axis are u_{l,m}.real(), 
+        and the last N are                          u_{l,m}.imag(),
+            written only for negative streamwise modes"""
+        L = self.nx//2; M = self.nz//2; N = self.N
+        origArr = self.copyArray().reshape((self.nx, self.nz, self.nd,N)) # This would throw an error if self.nt != 1
+        if (axis == 'x') or (axis == 0):
+            realArr = np.zeros((L + 1, self.nz, self.nd, 2*N), dtype=np.float)
+
+            realArr[:,:,:,:N] = np.real(origArr[:L+1])
+            realArr[:,:,:,N:] = np.imag(origArr[:L+1])
+        else:
+            realArr = np.zeros((self.nx, M+1, self.nd, 2*N), dtype=np.float)
+
+            realArr[:,:,:,:N] = np.real(origArr[:,:M+1])
+            realArr[:,:,:,N:] = np.imag(origArr[:,:M+1])
+
+
+        if not weighted:
+            return realArr.flatten()
+       
+        if weights is None:
+            weights = clencurt(N)
+
+        weights = np.sqrt(weights.reshape((1,1,1,N)))
+        weights = np.tile(weights,(1,1,1,2))
+
+        weightedArr = realArr*weights
+        
+        return weightedArr.flatten()
+
+
+
+        
+
+
+
 
 def _convolve(ff1,ff2):
     """Returns convolution of flowField instances ff1 and ff2 along x and z as a 3d numpy array

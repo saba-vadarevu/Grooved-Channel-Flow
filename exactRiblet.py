@@ -1,7 +1,13 @@
 import numpy as np
 from flowFieldWavy import *
 import scipy.integrate as spint
+import scipy as sp
 import sys
+try:
+    from scipy.optimize import least_squares
+    importLstsq = True
+except ImportError:
+    importLstsq = False
 
 tol = 1.0e-13
 linTol = 1.0e-10
@@ -585,9 +591,14 @@ def lineSearch(normFun,x0,dx,arr=None):
 
 
 
-def iterate(vf=None, pf=None,iterMax= 6, tol=5.0e-10,rcond=1.0e-06,doLineSearch=True,sigma1=True,sigma2=False,chebWeight=True,realValued=False):
-
-    N = vf.N
+def iterate(vf=None, pf=None,iterMax= 6, tol=5.0e-10,rcond=1.0e-06,doLineSearch=True,sigma1=True,sigma2=False,chebWeight=True,realValued=False,trustRegion=True,jacSparsity=True, **kwargs):
+    if trustRegion and importLstsq:
+        sigma2 = False
+        realValued=True
+        runTrustRegion=True
+        jacSparsity = False
+    
+    N = vf.N; L = vf.nx//2; M=vf.nz//2
     w = clencurt(N)
     q = np.sqrt(w)
     qinv = 1./q
@@ -623,6 +634,47 @@ def iterate(vf=None, pf=None,iterMax= 6, tol=5.0e-10,rcond=1.0e-06,doLineSearch=
     x.imposeSymms(sigma1=sigma1, sigma2=sigma2)
     # Impose real-valuedness (by default), and sigma1, sigma2, sigma3 if supplied as kwargs 
 
+    flowDict = x.flowDict.copy()
+
+    weights = clencurt(x.N)
+    def __resFunReal(xArr):
+        if sigma1:
+            xArr = xArr.reshape((L+1, M+1,4,2*N))
+            xArrNew = np.zeros((L+1, 2*M+1, 4, 2*N),dtype=np.float)
+            xArrNew[:,:M+1] = xArr[:]
+            # Assigning coefficients for m > 0:
+            # Idea here is to get u_{l,m} = (-1)^l C.u_{l,-m}, with C = (1,1,-1,1) for u,v,w,p 
+            compArr = np.array([1., 1., -1., 1.]).reshape((1,1,4,1))
+            lArr = np.arange(-L, 1).reshape(( L+1 , 1,1,1)) 
+            # l modes go from -L to 0
+            # Assigning modes m= M to m=1 using modes m=-M to m=-1:
+            xArrNew[:, :M:-1] =  (-1.)**lArr * compArr * xArr[:, :M]
+        else:
+            xArrNew = xArr
+            
+        ff = realField2ff(arr=xArrNew,axis='x', flowDict=x.flowDict, weights=weights,cls='riblet')
+        res = ff.residuals()
+        res = res.appendField(ff.div())
+
+        resArr = res.realField(axis='x').reshape((L+1, 2*M+1, 4, 2*N))
+        if sigma1:
+            resArr = resArr[:,:M+1]
+
+        return resArr.flatten()
+
+    def __jacSparsity(xArr):
+        if not jacSparsity:
+            return None
+        n1 = xArr.size//N
+        n2 = xArr.size
+        dataFill = np.ones((2*n1-1+(16*N-18), n2),dtype=np.int8)
+        offsets1 = np.arange(-(n1-1)*N,  -7*N, N)
+        offsets2 = np.arange(8*N, (n1-1)*N, N)
+        offsets3 = np.arange(-8*N+1, 8*N-1)
+        offsets = np.concatenate((offsets1, offsets2, offsets3))
+
+        jacSparseMat = sp.sparse.diags(dataFill, offsets, shape=(n2,n2),dtype=np.int8)
+        return jacSparseMat
 
     fnormArr=[]
     flg = 0
@@ -634,6 +686,31 @@ def iterate(vf=None, pf=None,iterMax= 6, tol=5.0e-10,rcond=1.0e-06,doLineSearch=
         print("Initial residual norm is %.3g"%(resnorm0))
 
     print('Starting iterations...............')
+    if runTrustRegion:
+        vf = x.slice(nd=[0,1,2]); pf = x.slice(nd=3)
+        x0Arr = x.realField(axis='x')
+        if sigma1:
+            x0Arr = x0Arr.reshape((L+1, 2*M+1, 4, 2*N))
+            x0Arr = x0Arr[:,:M+1].flatten()
+        optRes = least_squares(__resFunReal, x0Arr,jac_sparsity=__jacSparsity(x0Arr),bounds=(-1., 1.),verbose=2,**kwargs)
+        xArr = optRes.x
+        if sigma1:
+            xArr = xArr.reshape((L+1, M+1,4,2*N))
+            xArrNew = np.zeros((L+1, 2*M+1, 4, 2*N),dtype=np.float)
+            xArrNew[:,:M+1] = xArr[:]
+            # Assigning coefficients for m > 0:
+            # Idea here is to get u_{l,m} = (-1)^l C.u_{l,-m}, with C = (1,1,-1,1) for u,v,w,p 
+            compArr = np.array([1., 1., -1., 1.]).reshape((1,1,4,1))
+            lArr = np.arange(-L, 1).reshape(( L+1 , 1,1,1)) 
+            # l modes go from -L to 0
+            # Assigning modes m= M to m=1 using modes m=-M to m=-1:
+            xArrNew[:, :M:-1] =  (-1.)**lArr * compArr * xArr[:, :M]
+        else:
+            xArrNew = xArr
+            
+        xNew = realField2ff(arr=xArrNew,axis='x', flowDict=x.flowDict, weights=weights,cls='riblet')
+        return xNew.slice(nd=[0,1,2]), xNew.getScalar(nd=3), optRes.cost, optRes.status
+
     for n in range(iterMax):
         print('iter:',n+1)
 
