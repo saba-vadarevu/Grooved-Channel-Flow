@@ -591,12 +591,13 @@ def lineSearch(normFun,x0,dx,arr=None):
 
 
 
-def iterate(vf=None, pf=None,iterMax= 6, tol=5.0e-10,rcond=1.0e-06,doLineSearch=True,sigma1=True,sigma2=False,chebWeight=True,realValued=False,trustRegion=True,jacSparsity=True, **kwargs):
+def iterate(vf=None, pf=None,iterMax= 6, tol=5.0e-14,rcond=1.0e-06,doLineSearch=True,sigma1=True,sigma2=False,chebWeight=True,realValued=False,trustRegion=True,**kwargs):
     if trustRegion and importLstsq:
         sigma2 = False
         realValued=True
         runTrustRegion=True
-        jacSparsity = False
+    else:
+        runTrustRegion=False
     
     N = vf.N; L = vf.nx//2; M=vf.nz//2
     w = clencurt(N)
@@ -656,25 +657,22 @@ def iterate(vf=None, pf=None,iterMax= 6, tol=5.0e-10,rcond=1.0e-06,doLineSearch=
         res = ff.residuals()
         res = res.appendField(ff.div())
 
+        if kwargs['method'] == 'dogbox':
+            # dogbox doesn't do well with rank-deficient Jacobians
+            # Rank deficiency in the problem is mainly due to the zeroth pressure mode
+            # So, setting p_00 = 0 at both walls. Instead of add extra equations,
+            #       I'm adding these to the divergence for the last Fourier modes at the walls
+            res[0,0,0,3,0]  += np.abs(ff[0,ff.nx//2, ff.nz//2,3,0])
+            res[0,0,0,3,-1] += np.abs(ff[0,ff.nx//2, ff.nz//2,3,-1])
+            res[0,-1,-1,3,0]  += np.abs(ff[0,ff.nx//2, ff.nz//2,3,0])
+            res[0,-1,-1,3,-1] += np.abs(ff[0,ff.nx//2, ff.nz//2,3,-1])
+            # I'll try adding extra equations if this doesn't work out
+
         resArr = res.realField(axis='x').reshape((L+1, 2*M+1, 4, 2*N))
         if sigma1:
             resArr = resArr[:,:M+1]
 
         return resArr.flatten()
-
-    def __jacSparsity(xArr):
-        if not jacSparsity:
-            return None
-        n1 = xArr.size//N
-        n2 = xArr.size
-        dataFill = np.ones((2*n1-1+(16*N-18), n2),dtype=np.int8)
-        offsets1 = np.arange(-(n1-1)*N,  -7*N, N)
-        offsets2 = np.arange(8*N, (n1-1)*N, N)
-        offsets3 = np.arange(-8*N+1, 8*N-1)
-        offsets = np.concatenate((offsets1, offsets2, offsets3))
-
-        jacSparseMat = sp.sparse.diags(dataFill, offsets, shape=(n2,n2),dtype=np.int8)
-        return jacSparseMat
 
     fnormArr=[]
     flg = 0
@@ -692,7 +690,11 @@ def iterate(vf=None, pf=None,iterMax= 6, tol=5.0e-10,rcond=1.0e-06,doLineSearch=
         if sigma1:
             x0Arr = x0Arr.reshape((L+1, 2*M+1, 4, 2*N))
             x0Arr = x0Arr[:,:M+1].flatten()
-        optRes = least_squares(__resFunReal, x0Arr,jac_sparsity=__jacSparsity(x0Arr),bounds=(-1., 1.),verbose=2,**kwargs)
+        if ('method' in kwargs) and (kwargs['method'] == 'lm'):
+            bounds = (-np.inf,np.inf)
+        else:
+            bounds = (-1.,1.)
+        optRes = least_squares(__resFunReal, x0Arr,bounds=bounds,verbose=2,**kwargs)
         xArr = optRes.x
         if sigma1:
             xArr = xArr.reshape((L+1, M+1,4,2*N))
