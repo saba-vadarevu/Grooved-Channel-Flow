@@ -1229,7 +1229,13 @@ class flowField(np.ndarray):
         if realValued:
             self[:] = 0.5*( self + np.conjugate(self[:,::-1,::-1]))
 
+
         L = self.nx//2; M = self.nz//2
+        if self.nd > 3:
+            # In case the zeroth pressure mode has non-zero values at the wall:
+            self[0,L,M,3] -= self[0,L,M,3,0]
+
+
         lArr = np.arange(-L, L+1).reshape((1,self.nx,1,1,1))
         mArr = np.arange(-M, M+1).reshape((1,1,self.nz,1,1))
 

@@ -643,18 +643,17 @@ class flowFieldWavy(flowField):
         fName, pathPrefix = self.saveh5fName(fNamePrefix=fNamePrefix, prefix=prefix)
         fName = pathPrefix + fName
 
-        outFile = h5py.File(fName, "w")
-        assert self.nd == 4, "Save flowFields that include a pressure field"
+        with h5py.File(fName,"w") as outFile:
+            assert self.nd == 4, "Save flowFields that include a pressure field"
 
-        field = outFile.create_dataset("field",data=self.flatten(),compression='gzip')
+            field = outFile.create_dataset("field",data=self.flatten(),compression='gzip')
 
-        for key in self.flowDict:
-            field.attrs[key] = self.flowDict[key]
-        if isinstance(self,flowFieldRiblet):
-            field.attrs['class'] = 'flowFieldRiblet'
+            for key in self.flowDict:
+                field.attrs[key] = self.flowDict[key]
+            if isinstance(self,flowFieldRiblet):
+                field.attrs['class'] = 'flowFieldRiblet'
 
         print("saved field to ",fName)
-        outFile.close()
         return
 
 

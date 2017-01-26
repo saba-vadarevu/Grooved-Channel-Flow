@@ -591,9 +591,24 @@ def lineSearch(normFun,x0,dx,arr=None):
 
 
 
-def iterate(vf=None, pf=None,iterMax= 6, tol=5.0e-14,rcond=1.0e-06,doLineSearch=True,sigma1=True,sigma2=False,chebWeight=True,realValued=False,trustRegion=True,**kwargs):
+def iterate(vf=None, pf=None,iterMax= 6, tol=5.0e-14,rcond=1.0e-06,doLineSearch=True,sigma1=True,sigma2=False,chebWeight=True,realValued=False,**kwargs):
+    if ('method' in kwargs) and (kwargs['method'] in ("trf","dogbox","lm")):
+        trustRegion= True
+        method = kwargs['method']
+    elif 'method' not in kwargs:
+        trustRegion = False
+        warn('No method supplied in kwargs/argparse. Using Newton iterations with full-rank inversion and line search')
+    elif kwargs['method'] != 'simple':
+        trustReion = False
+        warn('Invalid method supplied in kwargs/argparse. Using Newton iterations with full-rank inversion and line search')
+    else:
+        trustRegion = False
+
+        
+
     if trustRegion and importLstsq:
-        sigma2 = False
+    # If scipy.optimize.least_squares cannot be imported, run simple newton search
+        # sigma2 = False
         realValued=True
         runTrustRegion=True
     else:
@@ -657,16 +672,15 @@ def iterate(vf=None, pf=None,iterMax= 6, tol=5.0e-14,rcond=1.0e-06,doLineSearch=
         res = ff.residuals()
         res = res.appendField(ff.div())
 
-        if kwargs['method'] == 'dogbox':
-            # dogbox doesn't do well with rank-deficient Jacobians
-            # Rank deficiency in the problem is mainly due to the zeroth pressure mode
-            # So, setting p_00 = 0 at both walls. Instead of add extra equations,
-            #       I'm adding these to the divergence for the last Fourier modes at the walls
-            res[0,0,0,3,0]  += np.abs(ff[0,ff.nx//2, ff.nz//2,3,0])
-            res[0,0,0,3,-1] += np.abs(ff[0,ff.nx//2, ff.nz//2,3,-1])
-            res[0,-1,-1,3,0]  += np.abs(ff[0,ff.nx//2, ff.nz//2,3,0])
-            res[0,-1,-1,3,-1] += np.abs(ff[0,ff.nx//2, ff.nz//2,3,-1])
-            # I'll try adding extra equations if this doesn't work out
+        # dogbox doesn't do well with rank-deficient Jacobians
+        # Rank deficiency in the problem is mainly due to the zeroth pressure mode
+        # So, to set  p_00 = 0 at both walls, instead of adding extra equations,
+        #       I'm adding these to the divergence for the last Fourier modes at the walls
+        res[0,0,0,3,0]  += np.abs(ff[0,ff.nx//2, ff.nz//2,3,0])
+        res[0,0,0,3,-1] += np.abs(ff[0,ff.nx//2, ff.nz//2,3,-1])
+        res[0,-1,-1,3,0]  += np.abs(ff[0,ff.nx//2, ff.nz//2,3,0])
+        res[0,-1,-1,3,-1] += np.abs(ff[0,ff.nx//2, ff.nz//2,3,-1])
+        # I'll try adding extra equations if this doesn't work out
 
         resArr = res.realField(axis='x').reshape((L+1, 2*M+1, 4, 2*N))
         if sigma1:
@@ -683,35 +697,62 @@ def iterate(vf=None, pf=None,iterMax= 6, tol=5.0e-14,rcond=1.0e-06,doLineSearch=
     else:
         print("Initial residual norm is %.3g"%(resnorm0))
 
+
+    
     print('Starting iterations...............')
     if runTrustRegion:
-        vf = x.slice(nd=[0,1,2]); pf = x.slice(nd=3)
-        x0Arr = x.realField(axis='x')
-        if sigma1:
-            x0Arr = x0Arr.reshape((L+1, 2*M+1, 4, 2*N))
-            x0Arr = x0Arr[:,:M+1].flatten()
+        def _symarr2ff(xArr): 
+            # Convert 1-d weighted, real, reduced array (reduced if sigma1 or sigma3) to flowFieldRiblet
+            if sigma1:
+                xArr = xArr.reshape((L+1, M+1,4,2*N))
+                xArrNew = np.zeros((L+1, 2*M+1, 4, 2*N),dtype=np.float)
+                xArrNew[:,:M+1] = xArr[:]
+                # Assigning coefficients for m > 0:
+                # Idea here is to get u_{l,m} = (-1)^l C.u_{l,-m}, with C = (1,1,-1,1) for u,v,w,p 
+                compArr = np.array([1., 1., -1., 1.]).reshape((1,1,4,1))
+                lArr = np.arange(-L, 1).reshape(( L+1 , 1,1,1)) 
+                # l modes go from -L to 0
+                # Assigning modes m= M to m=1 using modes m=-M to m=-1:
+                xArrNew[:, :M:-1] =  (-1.)**lArr * compArr * xArr[:, :M]
+            else:
+                xArrNew = xArr
+                
+            return realField2ff(arr=xArrNew,axis='x', flowDict=x.flowDict, weights=weights,cls='riblet')
+
+        def _ff2symarr(ff):
+            # Return weighted, real, reduced (if sigma1 or sigma3) 1d-array from flowfield
+            ffArr = ff.realField(axis='x')
+            if sigma1:
+                ffArr = ffArr.reshape((L+1, 2*M+1, 4, 2*N))
+                ffArr = ffArr[:,:M+1].flatten()
+            return ffArr
+
+        def jacFun(ffArr):
+            # Return Jacobian matrix for a given state-vector
+            ff = _symarr2ff(xArr)
+            J, F = makeSystem(vf=ff.slice(nd=[0,1,2]), pf=ff.getScalar(nd=3),sigma1=sigma1,sigma2=sigma2, realValued=realValued)
+            return J
+                
+        if ('supplyJac' in kwargs) and kwargs['supplyJac']:
+            jac = jacFun
+        else:
+            jac = '2-point'
+
         if ('method' in kwargs) and (kwargs['method'] == 'lm'):
             bounds = (-np.inf,np.inf)
         else:
             bounds = (-1.,1.)
-        optRes = least_squares(__resFunReal, x0Arr,bounds=bounds,verbose=2,**kwargs)
+
+        x0Arr = _ff2symarr(x)
+
+        optRes = least_squares(__resFunReal, x0Arr,jac=jac,bounds=bounds,verbose=2,**kwargs)
+       
         xArr = optRes.x
-        if sigma1:
-            xArr = xArr.reshape((L+1, M+1,4,2*N))
-            xArrNew = np.zeros((L+1, 2*M+1, 4, 2*N),dtype=np.float)
-            xArrNew[:,:M+1] = xArr[:]
-            # Assigning coefficients for m > 0:
-            # Idea here is to get u_{l,m} = (-1)^l C.u_{l,-m}, with C = (1,1,-1,1) for u,v,w,p 
-            compArr = np.array([1., 1., -1., 1.]).reshape((1,1,4,1))
-            lArr = np.arange(-L, 1).reshape(( L+1 , 1,1,1)) 
-            # l modes go from -L to 0
-            # Assigning modes m= M to m=1 using modes m=-M to m=-1:
-            xArrNew[:, :M:-1] =  (-1.)**lArr * compArr * xArr[:, :M]
-        else:
-            xArrNew = xArr
-            
-        xNew = realField2ff(arr=xArrNew,axis='x', flowDict=x.flowDict, weights=weights,cls='riblet')
+        xNew = _symarr2ff(xArr)
+        
         return xNew.slice(nd=[0,1,2]), xNew.getScalar(nd=3), optRes.cost, optRes.status
+
+
 
     for n in range(iterMax):
         print('iter:',n+1)
