@@ -163,8 +163,10 @@ class flowField(np.ndarray):
         obj.N = N
         obj.nd = flowDict['nd']
         yCheb,DM = chebdif(N,2)
+        w = clencurt(N)
         obj.y = yCheb
         obj.D = DM[:,:,0].reshape((N,N)); obj.D2 = DM[:,:,1].reshape((N,N))
+        obj.w = w
         
         return obj
         
@@ -181,6 +183,7 @@ class flowField(np.ndarray):
         self.y = getattr(self,'y',obj.y)
         self.D = getattr(self,'D',obj.D)
         self.D2 = getattr(self,'D2',obj.D2)
+        self.w = getattr(self,'w',obj.w)
         return
 
     
@@ -1212,8 +1215,21 @@ class flowField(np.ndarray):
         
         return symmsDict
 
+    def setWallVel(self):
+        """ For a given flow class (Couette/channel), set velocities at the wall to (1,-1) or (0,0)
+        Changes made in-place. Returns None"""
+        # Velocity at walls for all non-zero modes is 0
+        self[0,:,:,:3,[0,-1]] = 0.
 
-    def imposeSymms(self, realValued=True, sigma1=True, sigma2=False,sigma3=False):
+        # For channel flow, that's it. For Couette, reset velocity for u_00 to 1,-1
+        if self.flowDict['isPois'] == 0:
+            self[0,self.nx//2, self.nz//2, 0, 0] =  1.
+            self[0,self.nx//2, self.nz//2, 0,-1] = -1.
+
+        return
+
+
+    def imposeSymms(self, realValued=True, sigma1=True, sigma3=False):
         """ For a given flowField, modify Fourier modes such that symmetries are satisfied.
         Inputs:
             self: flowField instance
@@ -1245,12 +1261,6 @@ class flowField(np.ndarray):
             compArr = np.array([1., 1., -1., 1.]).reshape((1,1,1,4,1))
             self[:] = 0.5*( self + ( (-1.)**lArr) *compArr*  self[:, :, ::-1] )
             
-        if sigma2:
-            # u_{l,m} = (-1)^(l+m)* -u_{-l,m}(-y),  v_{l,m} = (-1)^(l+m)* -v_{-l,m}(-y)
-            # w_{l,m} = (-1)^(l+m)*  w_{-l,m}(-y),  p_{l,m} = (-1)^(l+m)*  p_{-l,m}(-y)
-            compArr = np.array([-1., -1., 1., 1.]).reshape((1,1,1,4,1))
-            self[:] = 0.5*( self + ( (-1.)**(lArr+mArr)) * compArr *  self[:, ::-1, :, :, ::-1] )
-
         if sigma3:
             # u_{l,m} = (-1)^(m)* -u_{-l,-m}(-y),  v_{l,m} = (-1)^(m)* -v_{-l,-m}(-y)
             # w_{l,m} = (-1)^(m)* -w_{-l,-m}(-y),  p_{l,m} = (-1)^(m)*  p_{-l,-m}(-y)
@@ -1260,7 +1270,7 @@ class flowField(np.ndarray):
         symmsDict = self.checkSymms(tol=1.0e-12)
         if sigma1:
             if not symmsDict['sigma1']: warn("sigma1 was not properly imposed")
-        if sigma2:
+        if sigma1 and sigma3:
             if not symmsDict['sigma2']: warn("sigma2 was not properly imposed")
         if sigma3:
             if not symmsDict['sigma3']: warn("sigma3 was not properly imposed")

@@ -3,6 +3,7 @@ from flowFieldWavy import *
 import scipy.integrate as spint
 import scipy as sp
 import sys
+import os
 try:
     from scipy.optimize import least_squares
     importLstsq = True
@@ -12,232 +13,304 @@ except ImportError:
 tol = 1.0e-13
 linTol = 1.0e-10
 
-def ff2arr(ff):
-    return ff.flatten()
-
-def arr2ff(arr=None,flowDict=None):
-    nx = 2*flowDict['L']+1; nz = 2*flowDict['M']+1; N = flowDict['N']
-    nd = arr.size//(nx*nz*N)
-    tempDict = updateDict(flowDict,{'nd':nd})
-    ff = flowFieldRiblet(flowDict=tempDict,arr=arr)
+def dict2ff(flowDict):
+    """ Returns a flowField with linear/quadratic profile at nd=0 depending on 'isPois'"""
+    ff = flowFieldRiblet(flowDict=updateDict(flowDict,{'nd':4}))
+    if flowDict['isPois']==0:
+        uProfile = ff.y
+    else:
+        uProfile = 1. - ff.y**2
+    ff[0,ff.nx//2,ff.nz//2,0] = uProfile
     return ff
 
-def setSymms(xTemp):
-    """Set velocities at walls to zero"""
-    x = xTemp.copy()
-    x.view4d()[:,:,:,:3,[0,-1]] = 0.
-    if x.flowDict['isPois']== 0:
-        x.view4d()[0,x.nx//2, x.nz//2, 0,[0,-1]] = np.array([1.,-1.])
-    
-    #vf[0,:,:vf.nz//2] = 0.5*(vf[0,:,:vf.nz//2]+ vf[0,:,:vf.nz//2:-1].conj())
-    #vf[0,:,:vf.nz//2:-1] = vf[0,:,:vf.nz//2].conj()
-    return x 
 
+class exactRiblet(object):
+    """
+    Defines equilibria problem/solver for riblet mounted Couette/channel flows
+    Version number is defined as: vY.M.xy, 
+        where Y=0 for 2017, M=0 for Jan, x (int) for new versions in the same month and y (char) for same day
+    Attributes:
+        x: flowFieldRiblet instance
+        attributes: dict with keys
+            sigma1, sigma3: PCF symmetries (bool)
+            method: 'simple' for Newton's method with line search, 
+                    and scipy.optimize.least_squares 's 'trf','dogbox', 'lm'
+            iterMax: Max no of iterations for method 'simple'
+                    used as max_nfev=iterMax+1 for 'trf','dogbox', and 
+                            max_nfev=(_ff2symarr(x).size/2)*iterMax for 'lm'
+            tol:    tolerance for iterations. Currently implemented only for 'simple'
+            log:    file to direct sys.stdout to
+            prefix: Prefix of file names to save hdf5 files to
+            supplyJac:  If True, supply jacobian matrix to least_squares(),
+                        Otherwise, let the algorithms run without a jacobian supplied
 
-
-
-def dict2ff(flowDict):
-    """ Returns a velocity flowField with linear/quadratic profile depending on 'isPois'"""
-    vf = flowFieldRiblet(flowDict=updateDict(flowDict,{'nd':3})).view4d()
-    if flowDict['isPois']==0:
-        uProfile = vf.y
-    else:
-        uProfile = 1. - vf.y**2
-    vf[0,vf.nx//2,vf.nz//2,0] = uProfile
-    return vf
-
-
-def linr(flowDict, sigma1 = True, sigma2=False,realValued=False): 
-    """Returns matrix representing the linear operator for the equilibria/TWS for riblet case
-    Inputs:
-        flowDict
-        complexType (default: np.complex): Use np.complex64 for single precision
-                            First element is eps_1, and so on... 
-        sigma1 (bool: True): shift-reflect symmetry
-        sigma2 (bool: False): shift-rotate symmetry
-    Outputs:
-        Lmat:   Matrix representing linear terms for the complete state-vectors"""
-    if 'epsArr' in flowDict:
-        epsArr = flowDict['epsArr']
-        if epsArr.ndim !=1: warn("epsArr is not a 1-D array. Fix this.")
-    else:
-        epsArr = np.array([0., flowDict['eps']])
-
-    complexType = np.complex
-
-    L = flowDict['L']; M = flowDict['M']
-    L1 = L+1
-    nx = int(2*L+1)
-    nz = int(2*M+1)
-    a = flowDict['alpha']; a2 = a**2
-    b = flowDict['beta']; b2 = b**2
-    Re = flowDict['Re']
-
-    N  = int(flowDict['N']); N4 = 4*N
-    y,DM = chebdif(N,2)
-    D = DM[:,:,0].reshape((N,N)); D2 = DM[:,:,1].reshape((N,N))
-    # Change N, D, and D2 if imposing point-wise inversion symmetries
-
-    I = np.identity(N); Z = np.zeros((N,N))
-
-    def _assignL0flat(L0flat,m):
-        assert (L0flat.shape[0] == N4) and (L0flat.shape[1] == N4)
-        # L_0,flat is built for the case of L= 0 without accounting for wall effects. 
-        L0flat[:,:] = np.vstack((
-                np.hstack(( -(-m**2 * b2 * I + D2)/Re,  Z,  Z,  Z   )),
-                np.hstack(( Z,  -(-m**2 * b2 * I + D2)/Re,  Z,  D   )),
-                np.hstack(( Z,  Z,  -(-m**2 * b2 * I + D2)/Re, 1.j*m*b*I )),
-                np.hstack(( Z,  D,  1.j*m*b*I,  Z))       ))
-        # First row-block is streamwise momentum equation, diffusion term. 
-        #       Pressure term isn't set because it's zero for l=0
-        # Second is wall-normal momentum
-        # Third is spanwise momentum
-        # Fourth is continuity
-        # Streamwise derivatives in all four equations are set to zero because l=0
-        return
-
-    Tz, Tzz, Tz2 = Tderivatives(updateDict(flowDict,{'epsArr':epsArr})) 
-
-    q0 = epsArr.size-1
-    # -1 because epsArr includes zeroth mode
-
-    # Number of columns is increased by 4*q0 because wall effects produce
-    #   interactions all the way from -M-2*q0 to M+2*q0
-    #   I prefer to build the matrix with these included, and then truncate to -M to M
-    L0wavy = np.zeros((nz*N4, (nz+4*q0)*N4), dtype=complexType)
-    # Wall effects show up in spanwise derivatives only
-    # d_z (.) = (-imb)(.) + \sum\limits_q  (T_{z,-q} D) (.)_{l,m+q}
-    # d_zz (.) = (-m^2 b^2)(.) + \sum\limits_q \{(T_{zz,-q} + 2i(m+q)bT_{z,-q})D + T^2_{z,-q} D^2\} (.)_{l,m+q}
-    for mp in range(nz):
-        m = mp-M
-        _assignL0flat(L0wavy[mp*N4:(mp+1)*N4, (mp+2*q0)*N4:(mp+2*q0+1)*N4], m)
-        # The principal diagonal is shifted by 2*q0= 2*(epsArr.size-1) 
-
-        # Wall-effects enter into the equations as
-        #   T_z(-q) * (.)_{l,m+q}
-        # Factor of u_{l,m+q} is supposed to be on the q^th diagonal,
-        #   however, since I add extra 2*q0 column-blocks on either end,
-        #   this factor must be on (q+2*q0)^th diagonal
-        for q in range(-q0, q0+1):
-            L0wavy[mp*N4:(mp+1)*N4, (mp+q+2*q0)*N4: (mp+q+2*q0+1)*N4] += np.vstack((
-                    np.hstack(( -1./Re*( (Tzz[-q+q0] + 2.j*(m+q)*b*Tz[-q+q0])*D) , Z, Z, Z)),
-                    np.hstack(( Z, -1./Re*( (Tzz[-q+q0] + 2.j*(m+q)*b*Tz[-q+q0])*D) , Z, Z )), 
-                    np.hstack(( Z, Z, -1./Re*( (Tzz[-q+q0] + 2.j*(m+q)*b*Tz[-q+q0])*D), Tz[-q+q0]*D )), 
-                    np.hstack((Z, Z, Tz[-q+q0]*D, Z))     ))
-        # In the above matrices, I did not include Tz2 terms, that's because 
-        #   Tz2 goes from -2*q0 to 2*q0. I add it separately below?
-        for q in range(-2*q0, 2*q0+1):
-            L0wavy[mp*N4:(mp+1)*N4, (mp+q+2*q0)*N4: (mp+q+2*q0+1)*N4] += np.vstack((
-                    np.hstack(( -1./Re*(Tz2[-q+2*q0]*D2), Z, Z, Z)),
-                    np.hstack(( Z, -1./Re*( Tz2[-q+2*q0]*D2), Z, Z )), 
-                    np.hstack(( Z, Z, -1./Re*(Tz2[-q+2*q0]*D2),Z )), 
-                    np.hstack((Z, Z, Z, Z))     ))
-    L0wavy = L0wavy[:, N4*2*q0: -N4*2*q0]   # Getting rid of the extra column-blocks
-    # And that concludes building L0wavy
-
-    if sigma1:
-        nz1 = M+1
-    else:
-        nz1 = nz
-    # Building Lmat for only m<= 0
-
-    nx = 2*L+1
-    # For exact solutions, we have L!= 0
-    #   So, I take L0wavy, and add i.l.alpha or -l**2.a**2 as appropriate
-    if sigma2: 
-        L1 = 1; nx1 = L+1
-    else: 
-        L1 = L+1; nx1 = 2*L+1 
-
-    mat1 = np.zeros((nz1*N4,nz1*N4),dtype=complexType); mat2 = mat1.copy()
-    # Define mat1 and mat2 such that all 'l' terms in the linear matrix can be 
-    #   written as l * mat1  + l^2 *mat2
-    # Their definition remains unchanged with imposition of sigma1
-    for mp in range(nz1):
-        # Row numbers correspond to equation, column numbers to field variable
-        #   mp*N4 +     (0:N)   : x-momentum or u
-        #               (N:2N)  : y-momentum or v
-        #               (2N:3N) : z-momentum or w
-        #               (3N:4N) : continuity or p
-
-        # x-momentum
-        # (-1/Re)* (d_xx u)_lm = l**2 * a2/Re * I * u_lm
-        mat2[mp*N4:mp*N4+N, mp*N4:mp*N4+N]      = a2/Re*I           
-        # (d_x p)_lm = l * i*a*I * p_lm
-        mat1[mp*N4:mp*N4+N, mp*N4+3*N:mp*N4+N4] = 1.j*a*I
-
-        # y-momentum
-        # (-1/Re)* (d_xx v)_lm = l**2 * a2/Re * I * v_lm
-        mat2[mp*N4+N:mp*N4+2*N, mp*N4+N:mp*N4+2*N]      = a2/Re*I           
-
-        # z-momentum
-        # (-1/Re)* (d_xx u)_lm = l**2 * a2/Re * I * u_lm
-        mat2[mp*N4+2*N:mp*N4+3*N, mp*N4+2*N:mp*N4+3*N]  = a2/Re*I           
-
-        # continuity
-        mat1[mp*N4+3*N:mp*N4+4*N, mp*N4 : mp*N4+N]      = 1.j*a*I
-
-        
-    s1 = nz1*N4
-    s3 = nz*N4
-    s2 = s3-s1
-
-    if sigma1:
-        # To add linear inter-modal contributions due to m > 0 modes
-        #    to equations for m <= 0;
-        # u_{l,-m} = (-1)^l u_{l,m}, v_{l,-m} = (-1)^l v_{l,m}, 
-        # w_{l,-m} =-(-1)^l w_{l,m}, p_{l,-m} = (-1)^l p_{l,m} 
-        # Equations for m <= 0 correspond to L0wavy[:s1]
-        # Contributions due to m > 0 correspond to L0wavy[., s1:]
-        # They need to be rearranged into N4xN4 blocks (for each Fourier mode),
-        #    and then multiplied by (-1)^l. 'w' needs to be multiplied with an extra -1
-        L0wavyTemp = L0wavy[:s1, s1:].reshape((s1, s2//N4, N4))
-
-        # Now, reordering so that modes go as M, M-1,...,1
-        L0wavyTemp = L0wavyTemp[:, ::-1]
-
-        # Multiplying the spanwise velocity with -1
-        L0wavyTemp[ :, :, 2*N:3*N] *= -1.
-        # Finally, reshaping
-        L0wavyTemp = L0wavyTemp.reshape((s1, s2))
-        # Now we're ready to multiply with (-1)^l and add to Lmat
-   
-    if sigma2 and realValued: warn('Do not impose both sigma2 and realValued. ')
-    if realValued: 
-        nx1 = 2*(L+1)
-        complexType = np.float64
-    Lmat = np.zeros((nx1*nz1*N4,nx1*nz1*N4),dtype=complexType)
-    # If imposing sigma1, build for only m <= 0 
-    # If imposing sigma2, build for only l <= 0
-    #    FOR SIGMA2, THIS IS ALL THAT NEEDS TO BE DONE. Just set L1 to 1 and nx1 to L+1,
-    #       No more folding needed. 
-    # If imposing realValued, build for only l<=0, but with real and imaginary parts separated.
-    #   The number of variables remains about the same, and so does the number of equations.
-    #   But the size of each element halves, this reduces memory usage.
-
-    Ltemp = np.zeros((s1, s1),dtype=np.complex)
-    if realValued:
-        LtempReal = np.zeros((2*s1, 2*s1), dtype=np.float)
-        L1 = 1
-    for l in range(-L,L1):
-        lp = l+L
-        Ltemp[:] = 0.
-        # Using s1 instead of nz*N4. If sigma1 is False, there is no difference
-        # Matrix from laminar case where l=0
-        Ltemp[:] = L0wavy[:s1, :s1]
-        # Adding all the l-terms
-        Ltemp[:] += l* mat1 + l**2 * mat2
-        
-        if sigma1:
-            # Adding L0wavyTemp:
-            Ltemp[:,:s2] += (-1.)**l  * L0wavyTemp
-        # As mentioned earlier, having L1 as 1 imposes sigma2. Nothing else needs to be done
-
-        if not realValued:
-            Lmat[lp*s1:(lp+1)*s1, lp*s1:(lp+1)*s1] = Ltemp
-    
+    """
+    def __init__(self, x=None,fName=None,**kwargs):
+        if x is None:
+            x = loadh5(fName)
+        assert isinstance(x,flowFieldRiblet) and (x.nd==4)
+        if 'epsArr' in x.flowDict:
+            x.flowDict['epsArr'] = np.array(x.flowDict['epsArr']).flatten()
         else:
-            # With realValued=True, all modes are split as real and imaginary
+            x.flowDict['epsArr'] = np.array([0., x.flowDict['eps']])
+        self.x = x
+        self.x0 = x.copy()
+        self.version_str = u'exactRiblet v0.1.1a'
+        self.attributes = {}
+        self.attributes['sigma1'] = kwargs.pop('sigma1',True)
+        self.attributes['sigma3'] = kwargs.pop('sigma3',True)
+        self.attributes['method'] = kwargs.pop('method','simple')   # 'trf', 'dogbox','lm','simple'
+        self.attributes['iterMax'] = kwargs.pop('iterMax',6)    # Max number of iterations
+        self.attributes['tol'] = kwargs.pop('tol',1.0e-13)      
+        self.attributes['log'] = kwargs.pop('log','outFile.txt')    # log file for output
+        self.attributes['prefix'] = kwargs.pop('prefix','ribEq1')   # file name prefix for saving hdf5 files
+        self.attributes['supplyJac'] = kwargs.pop('supplyJac',True) # Supply jacobian to trf or dogbox
+        self.attributes['version_str'] = self.version_str
+        self.attributes['saveDir'] = kwargs.pop('saveDir',None)     
+        # Directory to save intermediate solutions when running 'simple'. If None, don't save solutions
+
+        self.attributes.update(kwargs)
+
+    def printLog(self):
+        """ Redirect stdout to log file self.attributes['log'], 
+            and return a handle to original stdout.
+            If self.attributes['log'] is None or 'terminal', don't do anything (return original stdout still)
+            """
+        bufferSize = 1		# Unbuffered printing to file
+        if (self.attributes['log'] is None) or (self.attributes['log'] == 'terminal'):
+            return sys.stdout
+        outFile = open(workingDir+logName,'a',bufferSize)
+        orig_stdout = sys.stdout
+        sys.stdout = outFile
+        sys.stderr = outFile
+        return orig_stdout
+
+    def _symarr2ff(self,xArr): 
+        # Convert 1-d weighted, real, reduced array (reduced if sigma1 or sigma3) to flowFieldRiblet
+        N = self.x.N; M = self.x.nz//2; L = self.x.nx//2
+        NN = np.int(np.ceil(N/2.)); Nn = np.int(np.floor(N/2.))
+        sigma1 = self.attributes['sigma1']; sigma3 = self.attributes['sigma3']
+        coeffArr = -M + np.arange(M+1).reshape((1,M+1, 1,1,1))
+        coeffArr = np.tile(coeffArr, (1,1,4,2,1))
+        coeffArr[:,:,:,0] += 1  # For u,v,w, real part multiplies (-1)^(m+1), imaginary multiplies (-1)^m
+        coeffArr[:,:,3] += 1    # For p, there's an extra -1 factor compared to u,v,w
+
+        if sigma3:
+            xArr = xArr.reshape((L+1, M+1,4,2,NN))
+            xArr = np.concatenate((xArr, np.zeros((L+1,M+1,4,2,Nn),dtype=np.float)),axis=-1)
+            xArr[:,:,:,:,:NN-1:-1] = ((-1.)**coeffArr)*xArr[:,:,:,:,:Nn]
+
+        if sigma1:
+            xArr = xArr.reshape((L+1, M+1,4,2*N))
+            xArrNew = np.zeros((L+1, 2*M+1, 4, 2*N),dtype=np.float)
+            xArrNew[:,:M+1] = xArr[:]
+            # Assigning coefficients for m > 0:
+            # Idea here is to get u_{l,m} = (-1)^l C.u_{l,-m}, with C = (1,1,-1,1) for u,v,w,p 
+            compArr = np.array([1., 1., -1., 1.]).reshape((1,1,4,1))
+            lArr = np.arange(-L, 1).reshape(( L+1 , 1,1,1)) 
+            # l modes go from -L to 0
+            # Assigning modes m= M to m=1 using modes m=-M to m=-1:
+            xArrNew[:, :M:-1] =  (-1.)**lArr * compArr * xArr[:, :M]
+        else:
+            xArrNew = xArr
+            
+        return realField2ff(arr=xArrNew,axis='x', flowDict=self.x.flowDict,weights=self.x.w,cls='riblet')
+
+    def _ff2symarr(self,ff):
+        # Return weighted, real, reduced (if sigma1 or sigma3) 1d-array from flowfield
+        ffArr = ff.realField(axis='x')
+        L = self.x.nx//2; M = self.x.nz//2; N = self.x.N
+        sigma1 = self.attributes['sigma1']; sigma3 = self.attributes['sigma3']
+        if sigma1:
+            ffArr = ffArr.reshape((L+1, 2*M+1, 4, 2*N))
+            ffArr = ffArr[:,:M+1]
+        if sigma3:
+            NN = np.int( np.ceil(N/2.))
+            ffArr = ffArr.reshape((L+1,M+1,4,2,N))
+            ffArr = ffArr[:,:,:,:,:NN]            
+        return ffArr.flatten()
+
+    def linr(self): 
+        """Returns matrix representing the linear operator for the equilibria/TWS for riblet case
+        Inputs:
+            self
+        IMPORTANT: realValued is now always True. DO NOT SUPPLY AS A KEYWORD ARGUMENT
+        Outputs:
+            Lmat:   Matrix representing linear terms for the complete state-vectors"""
+        flowDict = self.x.flowDict
+        epsArr = flowDict['epsArr']
+        sigma1 = self.attributes['sigma1']
+        sigma3 = self.attributes['sigma3']
+
+
+        L = flowDict['L']; M = flowDict['M']; nx = self.x.nx; nz = self.x.nz
+        # nx1 = int(2*(L+1))  # For realvaluedness, lose L>0 modes, but double the number of coefficients
+        nx1 = L+1
+        a = flowDict['alpha']; a2 = a**2
+        b = flowDict['beta']; b2 = b**2
+        Re = flowDict['Re']
+
+        N  = int(self.x.N); N4 = 4*N
+        D = self.x.D; D2 = self.x.D2
+
+        I = np.identity(N); Z = np.zeros((N,N))
+
+        def _assignL0flat(L0flat,m):
+            assert (L0flat.shape[0] == N4) and (L0flat.shape[1] == N4)
+            # L_0,flat is built for the case of L= 0 without accounting for wall effects. 
+            L0flat[:,:] = np.vstack((
+                    np.hstack(( -(-m**2 * b2 * I + D2)/Re,  Z,  Z,  Z   )),
+                    np.hstack(( Z,  -(-m**2 * b2 * I + D2)/Re,  Z,  D   )),
+                    np.hstack(( Z,  Z,  -(-m**2 * b2 * I + D2)/Re, 1.j*m*b*I )),
+                    np.hstack(( Z,  D,  1.j*m*b*I,  Z))       ))
+            # First row-block is streamwise momentum equation, diffusion term. 
+            #       Pressure term isn't set because it's zero for l=0
+            # Second is wall-normal momentum
+            # Third is spanwise momentum
+            # Fourth is continuity
+            # Streamwise derivatives in all four equations are set to zero because l=0
+            return
+
+        Tz,Tzz, Tz2 = Tderivatives(self.x.flowDict)
+
+        q0 = epsArr.size-1
+        # -1 because epsArr includes zeroth mode
+
+        # Number of columns is increased by 4*q0 because wall effects produce
+        #   interactions all the way from -M-2*q0 to M+2*q0
+        #   I prefer to build the matrix with these included, and then truncate to -M to M
+        L0wavy = np.zeros((nz*N4, (nz+4*q0)*N4), dtype=np.complex)
+        # Wall effects show up in spanwise derivatives only
+        # d_z (.) = (-imb)(.) + \sum\limits_q  (T_{z,-q} D) (.)_{l,m+q}
+        # d_zz (.) = (-m^2 b^2)(.) + \sum\limits_q \{(T_{zz,-q} + 2i(m+q)bT_{z,-q})D + T^2_{z,-q} D^2\} (.)_{l,m+q}
+        for mp in range(nz):
+            m = mp-M
+            _assignL0flat(L0wavy[mp*N4:(mp+1)*N4, (mp+2*q0)*N4:(mp+2*q0+1)*N4], m)
+            # The principal diagonal is shifted by 2*q0= 2*(epsArr.size-1) 
+
+            # Wall-effects enter into the equations as
+            #   T_z(-q) * (.)_{l,m+q}
+            # Factor of u_{l,m+q} is supposed to be on the q^th diagonal,
+            #   however, since I add extra 2*q0 column-blocks on either end,
+            #   this factor must be on (q+2*q0)^th diagonal
+            for q in range(-q0, q0+1):
+                L0wavy[mp*N4:(mp+1)*N4, (mp+q+2*q0)*N4: (mp+q+2*q0+1)*N4] += np.vstack((
+                        np.hstack(( -1./Re*( (Tzz[-q+q0] + 2.j*(m+q)*b*Tz[-q+q0])*D) , Z, Z, Z)),
+                        np.hstack(( Z, -1./Re*( (Tzz[-q+q0] + 2.j*(m+q)*b*Tz[-q+q0])*D) , Z, Z )), 
+                        np.hstack(( Z, Z, -1./Re*( (Tzz[-q+q0] + 2.j*(m+q)*b*Tz[-q+q0])*D), Tz[-q+q0]*D )), 
+                        np.hstack((Z, Z, Tz[-q+q0]*D, Z))     ))
+            # In the above matrices, I did not include Tz2 terms, that's because 
+            #   Tz2 goes from -2*q0 to 2*q0. I add it separately below?
+            for q in range(-2*q0, 2*q0+1):
+                L0wavy[mp*N4:(mp+1)*N4, (mp+q+2*q0)*N4: (mp+q+2*q0+1)*N4] += np.vstack((
+                        np.hstack(( -1./Re*(Tz2[-q+2*q0]*D2), Z, Z, Z)),
+                        np.hstack(( Z, -1./Re*( Tz2[-q+2*q0]*D2), Z, Z )), 
+                        np.hstack(( Z, Z, -1./Re*(Tz2[-q+2*q0]*D2),Z )), 
+                        np.hstack((Z, Z, Z, Z))     ))
+        L0wavy = L0wavy[:, N4*2*q0: -N4*2*q0]   # Getting rid of the extra column-blocks
+        # And that concludes building L0wavy
+
+        if sigma1:
+            nz1 = M+1
+        else:
+            nz1 = nz
+        # Building Lmat for only m<= 0
+
+        mat1 = np.zeros((nz1*N4,nz1*N4),dtype=np.complex); mat2 = mat1.copy()
+        # Define mat1 and mat2 such that all 'l' terms in the linear matrix can be 
+        #   written as l * mat1  + l^2 *mat2
+        # Their definition remains unchanged with imposition of sigma1
+        for mp in range(nz1):
+            # Row numbers correspond to equation, column numbers to field variable
+            #   mp*N4 +     (0:N)   : x-momentum or u
+            #               (N:2N)  : y-momentum or v
+            #               (2N:3N) : z-momentum or w
+            #               (3N:4N) : continuity or p
+
+            # x-momentum
+            # (-1/Re)* (d_xx u)_lm = l**2 * a2/Re * I * u_lm
+            mat2[mp*N4:mp*N4+N, mp*N4:mp*N4+N]      = a2/Re*I           
+            # (d_x p)_lm = l * i*a*I * p_lm
+            mat1[mp*N4:mp*N4+N, mp*N4+3*N:mp*N4+N4] = 1.j*a*I
+
+            # y-momentum
+            # (-1/Re)* (d_xx v)_lm = l**2 * a2/Re * I * v_lm
+            mat2[mp*N4+N:mp*N4+2*N, mp*N4+N:mp*N4+2*N]      = a2/Re*I           
+
+            # z-momentum
+            # (-1/Re)* (d_xx u)_lm = l**2 * a2/Re * I * u_lm
+            mat2[mp*N4+2*N:mp*N4+3*N, mp*N4+2*N:mp*N4+3*N]  = a2/Re*I           
+
+            # continuity
+            mat1[mp*N4+3*N:mp*N4+4*N, mp*N4 : mp*N4+N]      = 1.j*a*I
+
+            
+        s1 = nz1*N4
+        s3 = nz*N4
+        s2 = s3-s1
+
+        if sigma1:
+            # To add linear inter-modal contributions due to m > 0 modes
+            #    to equations for m <= 0;
+            # u_{l,-m} = (-1)^l u_{l,m}, v_{l,-m} = (-1)^l v_{l,m}, 
+            # w_{l,-m} =-(-1)^l w_{l,m}, p_{l,-m} = (-1)^l p_{l,m} 
+            # Equations for m <= 0 correspond to L0wavy[:s1]
+            # Contributions due to m > 0 correspond to L0wavy[., s1:]
+            # They need to be rearranged into N4xN4 blocks (for each Fourier mode),
+            #    and then multiplied by (-1)^l. 'w' needs to be multiplied with an extra -1
+            L0wavyTemp = L0wavy[:s1, s1:].reshape((s1, s2//N4, N4))
+
+            # Now, reordering so that modes go as M, M-1,...,1
+            L0wavyTemp = L0wavyTemp[:, ::-1]
+
+            # Multiplying the spanwise velocity with -1
+            L0wavyTemp[ :, :, 2*N:3*N] *= -1.
+            # Finally, reshaping
+            L0wavyTemp = L0wavyTemp.reshape((s1, s2))
+            # Now we're ready to multiply with (-1)^l and add to Lmat
+       
+
+        # Important: s1, s2, and s3 are defined based on N and not NN=ceil(N/2)
+        #   This becomes relevant only in the last step where I fold LtempReal and assign to Lmat
+        if sigma3:
+            NN = np.int(np.ceil(N/2.))
+            Nn = np.int(np.floor(N/2.))
+            NN4 = 4*NN
+            s11 = nz1*NN4   # Count rows with s11 instead of s1 if (sigma3 and realValued)
+            # Define a coefficient matrix to use later for folding
+            coeffArr = -M + np.arange(M+1).reshape((1,M+1, 1,1,1))
+            coeffArr = np.tile(coeffArr, (1,1,4,2,1))
+            coeffArr[:,:,:,0] += 1  # For u,v,w, real part multiplies (-1)^(m+1), imaginary multiplies (-1)^m
+            coeffArr[:,:,3] += 1    # For p, there's an extra -1 factor compared to u,v,w
+        else: 
+            s11 = s1
+            NN = N; Nn = N; NN4 = 4*N
+        
+        Lmat = np.zeros(((L+1)*nz1*2*NN4,(L+1)*nz1*2*NN4),dtype=np.float)
+        # If imposing sigma1, build for only m <= 0 
+        # Because of realValued, build for only l<=0, but with real and imaginary parts separated.
+        #   The number of variables remains about the same, and so does the number of equations.
+        #   But the size of each element halves, this reduces memory usage.
+        # If imposing both sigma3 (=sigma1 and sigma2) also, build for NN=ceil(N/2),
+        #   else, build for NN = N.
+        #   In this case, we exploit even/odd nature of real and imaginary parts of variables
+
+        Ltemp = np.zeros((s1, s1),dtype=np.complex)
+        LtempReal = np.zeros((2*s1, 2*s1), dtype=np.float)
+        for l in range(-L,1):
+            lp = l+L
+            Ltemp[:] = 0.
+            # Using s1 instead of nz*N4. If sigma1 is False, there is no difference
+            # Matrix from laminar case where l=0
+            Ltemp[:] = L0wavy[:s1, :s1]
+            # Adding all the l-terms
+            Ltemp[:] += l* mat1 + l**2 * mat2
+            
+            if sigma1:
+                # Adding L0wavyTemp:
+                Ltemp[:,:s2] += (-1.)**l  * L0wavyTemp
+
+            # Because of realvaluedness, all modes are split as real and imaginary
             # So, each block (for each Fourier mode) is now of size (4x2xN)x(4x2xN),
             #   u_{lm} is of size 2N now, with Real(u_{lm}) first and Imag(u_{lm}) following
             # Az = (A_r z_r - A_i z_i) + i (A_i z_r + A_r z_i)
@@ -252,164 +325,192 @@ def linr(flowDict, sigma1 = True, sigma2=False,realValued=False):
 
             Ltemp = Ltemp.reshape((s1,s1))
             LtempReal = LtempReal.reshape((2*s1, 2*s1))
+            
+            if not sigma3:
+                LReal = LtempReal
+            else:
+                # LtempReal is all sorted out for sigma1 and realValued. If sigma3 is True, use it now
+                # Let's call the final version LReal
+                #   First, reshape columns to separate by 'm', 'nd', real/imag, and N
+                LReal = LtempReal.copy().reshape((2*s1, nz1, 4, 2, N))
+                # Now, reshape rows to separate by real/imag and N
+                LReal = LReal.reshape((s1//N, 2, N, nz1, 4, 2, N)) 
+                # Get rid of all the equations for y < 0, i.e., drop rows with N>= NN
+                LReal = LReal[:,:, :NN].reshape((2*s11, nz1,4, 2, N)) # Rows are now taken care of
+                # Now, separating nodes for + and -
+                LReal1 = LReal[:,:,:,:,:NN].copy(); LReal2 = LReal[:,:,:,:,NN:].copy()
+                LReal = LReal1
+                # Now, I just have to fold LReal2 onto LReal
+                # When folding the columns, 
+                #   I need to account for even and odd functions. coeffArr does this
 
-            Lmat[lp*2*s1:(lp+1)*2*s1, lp*2*s1:(lp+1)*2*s1] = LtempReal
-
-    return Lmat
-
+                LReal[:, :,:,:, :Nn] += ((-1.)**coeffArr) * LReal2[:,:,:,:, ::-1]
+                LReal = LReal.reshape((2*s11, 2*s11))
 
 
-def jcbn(vf,Lmat=None,sigma1=True,sigma2=False,realValued=False):
-    if Lmat is None:
-        raise RuntimeError('The Jacobian is added in-place to Lmat. Always supply Lmat. Returning.....')
+                
+            Lmat[lp*2*s11:(lp+1)*2*s11, lp*2*s11:(lp+1)*2*s11] = LReal
 
-    if sigma1: nz1 = vf.nz//2 + 1
-    else: nz1 = vf.nz
-
-    if sigma2: nx1 = vf.nx//2 + 1
-    else: nx1 = vf.nx
+        return Lmat
 
 
-    a = vf.flowDict['alpha']; b = vf.flowDict['beta']
-    epsArr = vf.flowDict['epsArr']
-    q0 = epsArr.size-1
-    Tz = Tderivatives(vf.flowDict)[0]
-    N = vf.N; L = vf.nx//2; M = vf.nz//2; N4 = 4*N
 
-    # No reason to keep accessing flowFieldRiblet with all its extra machinery
-    #   Copy elements to a regular numpy array instead
-    vfArr = vf.view4d().copyArray()
-    u = vfArr[0,:,:,0]; v = vfArr[0,:,:,1]; w = vfArr[0,:,:,2]
-    vfyArr = vf.ddy().view4d().copyArray()
-    uy = vfyArr[0,:,:,0]; vy = vfyArr[0,:,:,1]; wy = vfyArr[0,:,:,2]
-    # The state-vectors aren't that big, so memory isn't an issue
+    def jcbn(self,ff,Lmat=None):
+        if Lmat is None:
+            raise RuntimeError('jcbn returns None, the matrix has to be supplied so it can be modified in-place')
+        sigma1 = self.attributes['sigma1']; sigma3 = self.attributes['sigma3']
+        vf = ff.slice(nd=[0,1,2]); pf = ff.getScalar(nd=3)
 
-    D = vf.D; I = np.identity(vf.N, dtype=Lmat.dtype); Z = np.zeros((vf.N,vf.N),dtype=Lmat.dtype)
-    D.astype(Lmat.dtype)
+        if sigma1: nz1 = vf.nz//2 + 1
+        else: nz1 = vf.nz
+        nx1 = vf.nx//2 + 1
 
-    # Index of the first row/column of the block for any wavenumber vector (l,m)
-    iFun = lambda l,m: (l+L)*(nz1*4*N) + (m+M)*4*N
-    iFun0 = lambda l,m : (l+L)*vf.nz*4*N + (m+M)*4*N 
-    # When sigma1 is imposed, I build a G for all l',m' (including l'>0,m'>0). 
-    #   I need iFun0 for this case
+        a = vf.flowDict['alpha']; b = vf.flowDict['beta']
+        epsArr = vf.flowDict['epsArr']
+        q0 = epsArr.size-1
+        Tz = Tderivatives(self.x.flowDict)[0]
+        N = vf.N; L = vf.nx//2; M = vf.nz//2; N4 = 4*N
 
-    Gmat = Lmat
-    #assert (Gmat.shape[0] == nx1*nz1*4*N) and (Gmat.shape[1] == nx1*nz1*4*N)
+        # No reason to keep accessing flowFieldRiblet with all its extra machinery
+        #   Copy elements to a regular numpy array instead
+        vfArr = vf.view4d().copyArray()
+        u = vfArr[0,:,:,0]; v = vfArr[0,:,:,1]; w = vfArr[0,:,:,2]
+        vfyArr = vf.ddy().view4d().copyArray()
+        uy = vfyArr[0,:,:,0]; vy = vfyArr[0,:,:,1]; wy = vfyArr[0,:,:,2]
+        # The state-vectors aren't that big, so memory isn't an issue
 
-    # I will be using the functions np.diag() and np.dot() quite often, so,
-    diag = np.diag; dot = np.dot
+        D = vf.D; I = np.identity(vf.N, dtype=Lmat.dtype); Z = np.zeros((vf.N,vf.N),dtype=Lmat.dtype)
+        D.astype(Lmat.dtype)
 
-    # To calculate Gmat:
-    #   Go through each row-column-block of the matrix and figure out which 
-    #           u_{l,m} goes there (along with factors for derivatives)
-    # This is the notation I shall use:
-    # l , m represent the mode for which the equation is written
-    #   I use phi_lm to represent the convection term in the NSE for mode (l,m)
-    #   phi^1 is streamwise convection term: phi^1 = u d_x u + v d_y u + w d_z u
-    #   phi^2 is wall-normal, phi^3 is spanwise
-    # So, the wave-triads go as { (l', m'), (l,m), (l-l',m-m')} (for terms not involving wall-effects)
-    #   u_{l-l',m-m'} is populated in row-block corresponding to phi_{l,m} in column-block for u_{l',m'}
+        # Index of the first row/column of the block for any wavenumber vector (l,m)
+        iFun = lambda l,m: (l+L)*(nz1*4*N) + (m+M)*4*N
+        iFun0 = lambda l,m : (l+L)*vf.nz*4*N + (m+M)*4*N 
+        # When sigma1 is imposed, I build a G for all l',m' (including l'>0,m'>0). 
+        #   I need iFun0 for this case
 
-    # Strictly speaking, what I'm building is not the Jacobian G
-    # I'm building G such that N(\chi) = 0.5 * G * \chi, where \chi is the state-vector
-    # G differs from the Jacobian of N only in terms of
-    #                           d/du (u') being written as D instead of u''/ u' (which might produces NaNs)
+        if sigma3:
+            NN = np.int(np.ceil(N/2.))
+            Nn = np.int(np.floor(N/2.))
+            NN4 = 4*NN
+            # Define a coefficient matrix to use later for folding
+            coeffArr = -M + np.arange(M+1).reshape((1,M+1, 1,1,1))
+            coeffArr = np.tile(coeffArr, (1,1,4,2,1))
+            coeffArr[:,:,:,0] += 1  # For u,v,w, real part multiplies (-1)^(m+1), imaginary multiplies (-1)^m
+            coeffArr[:,:,3] += 1    # For p, there's an extra -1 factor compared to u,v,w
+            coeffArr = coeffArr.reshape((1,1,M+1,4,2,1))  # The first axis is for equations
+        else: 
+            NN = N; Nn = N; NN4 = 4*N
+        Gmat = Lmat
+        #assert (Gmat.shape[0] == nx1*nz1*4*N) and (Gmat.shape[1] == nx1*nz1*4*N)
 
-    # Final piece of notation: 
-    ia = 1.j*a; ib = 1.j*b
+        # I will be using the functions np.diag() and np.dot() quite often, so,
+        diag = np.diag; dot = np.dot
 
-    if sigma1: M1 = 1
-    else: M1 = M+1
-    if sigma2: L1 = 1
-    else: L1 = L+1
-    # If sigma1, write equations only until m < 1, else, until m<M+1
-    # If sigma2, write equations only until l < 1, else, until l<L+1
+        # To calculate Gmat:
+        #   Go through each row-column-block of the matrix and figure out which 
+        #           u_{l,m} goes there (along with factors for derivatives)
+        # This is the notation I shall use:
+        # l , m represent the mode for which the equation is written
+        #   I use phi_lm to represent the convection term in the NSE for mode (l,m)
+        #   phi^1 is streamwise convection term: phi^1 = u d_x u + v d_y u + w d_z u
+        #   phi^2 is wall-normal, phi^3 is spanwise
+        # So, the wave-triads go as { (l', m'), (l,m), (l-l',m-m')} (for terms not involving wall-effects)
+        #   u_{l-l',m-m'} is populated in row-block corresponding to phi_{l,m} in column-block for u_{l',m'}
 
-        
-    # The convection term has this form:
-    # phi^{lm}_{1,2,3} = \sum_lp \sum_mp  u_{l-lp,m-mp} u_{lp,mp}  , 
-    #    disregarding the surface influence terms. 
-    # Gmat is the actual non-linear jacobian
-    # G is a temporary matrix created for each 'lp' in equations for each (l,m) in the Jacobian,
-    # If sigma1 is to be imposed,
-    #    G is folded and multiplied with (-1)**lp before being assigned to the
-    #        corresponding rows and columns in Gmat
-    # Otherwise, G is added as is
-    G = np.zeros((4*N, vf.nx*vf.nz*4*N), dtype=np.complex)
+        # Strictly speaking, what I'm building is not the Jacobian G
+        # I'm building G such that N(\chi) = 0.5 * G * \chi, where \chi is the state-vector
+        # G differs from the Jacobian of N only in terms of
+        #                           d/du (u') being written as D instead of u''/ u' (which might produces NaNs)
 
-    if realValued:
+        # Final piece of notation: 
+        ia = 1.j*a; ib = 1.j*b
+
+        if sigma1: M1 = 1
+        else: M1 = M+1
+        # If sigma1, write equations only until m < 1, else, until m<M+1
+
+            
+        # The convection term has this form:
+        # phi^{lm}_{1,2,3} = \sum_lp \sum_mp  u_{l-lp,m-mp} u_{lp,mp}  , 
+        #    disregarding the surface influence terms. 
+        # Gmat is the actual non-linear jacobian
+        # G is a temporary matrix created for each 'lp' in equations for each (l,m) in the Jacobian,
+        # If sigma1 is to be imposed,
+        #    G is folded and multiplied with (-1)**lp before being assigned to the
+        #        corresponding rows and columns in Gmat
+        # Otherwise, G is added as is
+        G = np.zeros((4*N, vf.nx*vf.nz*4*N), dtype=np.complex)
+
         GReal = np.zeros((8*N, L+1,vf.nz,4,2*N), dtype=np.float)
-        L1 = 1
 
-    for l in range(-L,L1):
-        for m in range(-M,M1):
-            # l1,m2 are the wavenumbers in phi^j_{lm}
-            G[:] = 0.    # Getting rid of G from previous 
-            rInd = 0     # We're only writing equations for one l,m
-            # G contains the part of the Jacobian that multiplies all modes  
-            #    in the equations for (l,m)
-            # I will define this without assuming symmetries
-            # Before adding to Gmat, I will fold G on itself according to sigma1, sigma2
+        for l in range(-L,1):
+            for m in range(-M,M1):
+                # l1,m2 are the wavenumbers in phi^j_{lm}
+                G[:] = 0.    # Getting rid of G from previous 
+                rInd = 0     # We're only writing equations for one l,m
+                # G contains the part of the Jacobian that multiplies all modes  
+                #    in the equations for (l,m)
+                # I will define this without assuming symmetries
+                # Before adding to Gmat, I will fold G on itself according to sigma1, sigma2
 
-            for lp in range(-L,L+1):
-                for mp in range(-M,M+1):
-                    cInd = iFun0(lp,mp)
-                    if (-L <= (l-lp) <= L):
-                        li = l-lp+L # Array index for streamwise wavenumber l-lp
+                for lp in range(-L,L+1):
+                    for mp in range(-M,M+1):
+                        cInd = iFun0(lp,mp)
+                        if (-L <= (l-lp) <= L):
+                            li = l-lp+L # Array index for streamwise wavenumber l-lp
 
-                        # First, all the terms not relating to wall-effects
-                        if (-M <= (m-mp) <= M):
-                            mi = m-mp+M # Array index for spanwise wavenumber m-mp
-                            # phi^1_{l,m}: factors of terms with  u_{lp,mp}:
-                            G[ rInd+0*N : rInd+1*N , cInd+0*N : cInd+1*N ] += \
-                                    ( l*ia* diag(u[li, mi])  + v[li,mi].reshape((N,1)) *D + diag(w[li,mi])*mp*ib )
-                            # phi^1_{l,m}: factors of terms with  v_{lp,mp}:
-                            G[ rInd+0*N : rInd+1*N , cInd+1*N : cInd+2*N ] += (diag(uy[li, mi]))
-                            # phi^1_{l,m}: factors of terms with  w_{lp,mp}
-                            G[ rInd+0*N : rInd+1*N , cInd+2*N : cInd+3*N ] += ((m-mp)*ib*diag(u[li, mi]))
+                            # First, all the terms not relating to wall-effects
+                            if (-M <= (m-mp) <= M):
+                                mi = m-mp+M # Array index for spanwise wavenumber m-mp
+                                # phi^1_{l,m}: factors of terms with  u_{lp,mp}:
+                                G[ rInd+0*N : rInd+1*N , cInd+0*N : cInd+1*N ] += \
+                                        ( l*ia* diag(u[li, mi])  + v[li,mi].reshape((N,1)) *D + diag(w[li,mi])*mp*ib )
+                                # phi^1_{l,m}: factors of terms with  v_{lp,mp}:
+                                G[ rInd+0*N : rInd+1*N , cInd+1*N : cInd+2*N ] += (diag(uy[li, mi]))
+                                # phi^1_{l,m}: factors of terms with  w_{lp,mp}
+                                G[ rInd+0*N : rInd+1*N , cInd+2*N : cInd+3*N ] += ((m-mp)*ib*diag(u[li, mi]))
 
-                            # phi^2_{l,m}: factors of terms with  v_{lp,mp}:
-                            G[ rInd+1*N : rInd+2*N , cInd+1*N : cInd+2*N ] += \
-                                    (    lp*ia* diag(u[li, mi])  + v[li,mi].reshape((N,1)) *D + diag(w[li,mi])*mp*ib \
-                                    + diag(vy[li,mi])   )
-                            # phi^2_{l,m}: factors of terms with  u_{lp,mp}:
-                            G[ rInd+1*N : rInd+2*N , cInd+0*N : cInd+1*N ] += ((l-lp)*ia*diag(v[li, mi])  )
-                            # phi^2_{l,m}: factors of terms with  w_{lp,mp}:
-                            G[ rInd+1*N : rInd+2*N , cInd+2*N : cInd+3*N ] += ((m-mp)*ib*diag(v[li, mi])  )
+                                # phi^2_{l,m}: factors of terms with  v_{lp,mp}:
+                                G[ rInd+1*N : rInd+2*N , cInd+1*N : cInd+2*N ] += \
+                                        (    lp*ia* diag(u[li, mi])  + v[li,mi].reshape((N,1)) *D + diag(w[li,mi])*mp*ib \
+                                        + diag(vy[li,mi])   )
+                                # phi^2_{l,m}: factors of terms with  u_{lp,mp}:
+                                G[ rInd+1*N : rInd+2*N , cInd+0*N : cInd+1*N ] += ((l-lp)*ia*diag(v[li, mi])  )
+                                # phi^2_{l,m}: factors of terms with  w_{lp,mp}:
+                                G[ rInd+1*N : rInd+2*N , cInd+2*N : cInd+3*N ] += ((m-mp)*ib*diag(v[li, mi])  )
 
-                            # phi^3_{l,m}: factors of terms with  w_{lp,mp}:
-                            G[ rInd+2*N : rInd+3*N , cInd+2*N : cInd+3*N ] += \
-                                    (  lp*ia* diag(u[li, mi])  + v[li,mi].reshape((N,1)) *D + m*ib*diag(w[li,mi])  )
-                            # phi^3_{l,m}: factors of terms with  v_{lp,mp}:
-                            G[ rInd+2*N : rInd+3*N , cInd+1*N : cInd+2*N ] += (   diag(wy[li, mi]) )
-                            # phi^3_{l,m}: factors of terms with  u_{lp,mp}:
-                            G[ rInd+2*N : rInd+3*N , cInd+0*N : cInd+1*N ] += (   (l-lp)*ia*diag(w[li, mi])  )
+                                # phi^3_{l,m}: factors of terms with  w_{lp,mp}:
+                                G[ rInd+2*N : rInd+3*N , cInd+2*N : cInd+3*N ] += \
+                                        (  lp*ia* diag(u[li, mi])  + v[li,mi].reshape((N,1)) *D + m*ib*diag(w[li,mi])  )
+                                # phi^3_{l,m}: factors of terms with  v_{lp,mp}:
+                                G[ rInd+2*N : rInd+3*N , cInd+1*N : cInd+2*N ] += (   diag(wy[li, mi]) )
+                                # phi^3_{l,m}: factors of terms with  u_{lp,mp}:
+                                G[ rInd+2*N : rInd+3*N , cInd+0*N : cInd+1*N ] += (   (l-lp)*ia*diag(w[li, mi])  )
 
-                        # Now, the terms arising due to wall effects
-                        # The interactions in l are unaffected since Tz only have e^iqb
+                            # Now, the terms arising due to wall effects
+                            # The interactions in l are unaffected since Tz only have e^iqb
 
-                        for q in range(-q0,q0+1):
+                            for q in range(-q0,q0+1):
 
-                            if (-M <= (m-mp+q) <= M):
-                                mi = m-mp+q+M # Array index for spanwise wavenumber m-mp
-                                # phi^1_{l,m}: factors of terms with u_{lp,mp}
-                                G[ rInd+0*N : rInd+1*N , cInd+0*N : cInd+1*N ] += Tz[q0-q]* w[li,mi].reshape((N,1)) * D 
-                                # phi^1_{l,m}: factors of terms with w_{lp,mp}
-                                G[ rInd+0*N : rInd+1*N , cInd+2*N : cInd+3*N ] += Tz[q0-q]* diag(uy[li,mi]) 
+                                if (-M <= (m-mp+q) <= M):
+                                    mi = m-mp+q+M # Array index for spanwise wavenumber m-mp
+                                    # phi^1_{l,m}: factors of terms with u_{lp,mp}
+                                    G[ rInd+0*N : rInd+1*N , cInd+0*N : cInd+1*N ] += Tz[q0-q]* w[li,mi].reshape((N,1)) * D 
+                                    # phi^1_{l,m}: factors of terms with w_{lp,mp}
+                                    G[ rInd+0*N : rInd+1*N , cInd+2*N : cInd+3*N ] += Tz[q0-q]* diag(uy[li,mi]) 
 
-                                # phi^2_{l,m}: factors of terms with v_{lp,mp}
-                                G[ rInd+1*N : rInd+2*N , cInd+1*N : cInd+2*N ] += Tz[q0-q]* w[li,mi].reshape((N,1)) * D 
-                                # phi^2_{l,m}: factors of terms with w_{lp,mp}
-                                G[ rInd+1*N : rInd+2*N , cInd+2*N : cInd+3*N ] += Tz[q0-q]* diag(vy[li,mi]) 
+                                    # phi^2_{l,m}: factors of terms with v_{lp,mp}
+                                    G[ rInd+1*N : rInd+2*N , cInd+1*N : cInd+2*N ] += Tz[q0-q]* w[li,mi].reshape((N,1)) * D 
+                                    # phi^2_{l,m}: factors of terms with w_{lp,mp}
+                                    G[ rInd+1*N : rInd+2*N , cInd+2*N : cInd+3*N ] += Tz[q0-q]* diag(vy[li,mi]) 
 
-                                # phi^3_{l,m}: factors of terms with w_{lp,mp}
-                                G[ rInd+2*N : rInd+3*N , cInd+2*N : cInd+3*N ] += Tz[q0-q]* w[li,mi].reshape((N,1)) * D \
-                                        +Tz[q0-q]* diag(wy[li,mi]) 
-            # Now, G is ready to be folded if sigma1 holds
-            lArr0 = np.arange(-L,L+1).reshape((1,vf.nx, 1,1,1))
-            mArr = np.arange(-M,M+1).reshape((1,1, vf.nz,1,1))
-            Gnew = G.reshape((4*N,vf.nx, vf.nz, 4,N))
-            if realValued: 
+                                    # phi^3_{l,m}: factors of terms with w_{lp,mp}
+                                    G[ rInd+2*N : rInd+3*N , cInd+2*N : cInd+3*N ] += Tz[q0-q]* w[li,mi].reshape((N,1)) * D \
+                                            +Tz[q0-q]* diag(wy[li,mi]) 
+                # Now, G is ready to be folded if sigma1 holds
+                lArr0 = np.arange(-L,L+1).reshape((1,vf.nx, 1,1,1))
+                mArr = np.arange(-M,M+1).reshape((1,1, vf.nz,1,1))
+                Gnew = G.reshape((4*N,vf.nx, vf.nz, 4,N))
                 Gtemp = Gnew.reshape((4,N,vf.nx, vf.nz, 4,N))
                 # With realValued=True, all modes are split as real and imaginary
                 # So, each block (for each Fourier mode) is now of size (4x2xN)x(4x2xN),
@@ -435,569 +536,495 @@ def jcbn(vf,Lmat=None,sigma1=True,sigma2=False,realValued=False):
 
                 Gnew = GReal.reshape((8*N, L+1, vf.nz, 4,2*N))
                 lArr = lArr0[:,:L]
-            elif sigma2:
-                Gtemp = Gnew
-                compArr = np.array([-1., -1., 1., 1.]).reshape((1,1,1,4,1))
-                lArr = lArr0[:,:L]
-                Gtemp[:, :L] += (-1.)**(lArr+mArr) * compArr * Gtemp[:, :L:-1, :, :, ::-1]
-                Gtemp = Gtemp[:,:L+1]
-                # l =0 mode is unchanged
-                # l < 0 modes are already part of Gtemp
-                # Take l>0 in Gtemp, flip y-part (last index) so that +y lines up with -y,
-                #   flip l>0 modes so l lines up with -l,
-                #   multiply u,v with -1, w,p with 1,
-                #   multiply the whole thing with -1^(l+m)
-                # and add the result to l<0 modes 
-                Gnew = Gtemp
 
-            if sigma1:
-                # The relation between u_{lm} and u_{l,-m} remains unchaged with imposition of realValuedness
-                #   because there's no 1.j in the eqns u_{l,m} = (-1)^l u_{l,-m} etc..
-                compArr = np.array([1., 1., -1., 1.]).reshape((1,1,1,4,1))
-                Gtemp  = Gnew[:,:, :M+1]      # Copying G as is for m <= 0
-                Gtemp[:, :, :M] += ((-1.)**lArr0[:, :Gnew.shape[1]]) * compArr * Gnew[:,:,:M:-1]
-                # For m>0 in G (or Gnew), array is reordered so m lines up with -m,
-                #   u,v,p are multiplied by 1, w by -1,
-                #    and columns for 'l' are multiplied with -1^l
-                Gnew = Gtemp
-                
+                if sigma1:
+                    # The relation between u_{lm} and u_{l,-m} remains unchaged with imposition of realValuedness
+                    #   because there's no 1.j in the eqns u_{l,m} = (-1)^l u_{l,-m} etc..
+                    compArr = np.array([1., 1., -1., 1.]).reshape((1,1,1,4,1))
+                    Gtemp  = Gnew[:,:, :M+1]      # Copying G as is for m <= 0
+                    Gtemp[:, :, :M] += ((-1.)**lArr0[:, :Gnew.shape[1]]) * compArr * Gnew[:,:,:M:-1]
+                    # For m>0 in G (or Gnew), array is reordered so m lines up with -m,
+                    #   u,v,p are multiplied by 1, w by -1,
+                    #    and columns for 'l' are multiplied with -1^l
+                    Gnew = Gtemp
+                    
 
+                if sigma3:
+                    # Gnew is all sorted out for sigma1 and realValued. If sigma3 is True, use it now
+                    # Let's define a temporary array from Gnew
+                    #   First, reshape columns to separate by 'l','m', 'nd', real/imag, and N
+                    GnewReal = Gnew.copy()
+                    GnewReal = GnewReal.reshape((8*N, L+1, nz1, 4, 2, N))
+                    # Now, reshape rows to separate by real/imag and N
+                    GnewReal = GnewReal.reshape((4,2, N, L+1, nz1, 4, 2, N)) 
+                    # Get rid of all the equations for y < 0, i.e., drop rows with N>= NN
+                    GnewReal = GnewReal[:,:, :NN].reshape((8*NN,L+1, nz1,4, 2, N)) # Rows are now taken care of
+                    # Now, separating nodes for + and -
+                    GnewReal1 = GnewReal[:,:, :,:,:,:NN].copy(); GnewReal2 = GnewReal[:,:,:,:,:,NN:].copy()
+                    Gnew = GnewReal1
+                    # Now, I just have to fold GnewReal2 onto GnewReal
+                    # When folding the columns, 
+                    #   I need to account for even and odd functions. coeffArr does this
 
-            if not realValued:                
-                Gnew = Gnew.reshape((4*N, nx1*nz1*4*N))
-                cInd = 0 # Because columns for all modes are filled at once
-                rInd = iFun(l,m)
-                Gmat[rInd: rInd+4*N, cInd: cInd+nx1*nz1*4*N] += Gnew
-            else:
-                Gnew = Gnew.reshape((8*N, (L+1)*nz1*8*N))
+                    Gnew[:, :,:,:,:, :Nn] += ((-1.)**coeffArr) * GnewReal2[:,:,:,:,:, ::-1]
+
+                Gnew = Gnew.reshape((8*NN, (L+1)*nz1*8*NN))
                 cInd = 0
-                rInd = (l+L)*(nz1*8*N) + (m+M)*8*N
-                Gmat[rInd: rInd+8*N, cInd: cInd+nx1*nz1*8*N] += Gnew
-    return  
+                rInd = (l+L)*(nz1*8*NN) + (m+M)*8*NN
+                Gmat[rInd: rInd+8*NN, cInd: cInd+nx1*nz1*8*NN] += Gnew
+        return  
 
 
-def _residual(x):
-    return (x.slice(nd=[0,1,2]).residuals(pField=x.getScalar(nd=3)).appendField( x.slice(nd=[0,1,2]).div() ) )
+    def _residual(self):
+        return (self.x.slice(nd=[0,1,2]).residuals(pField=x.getScalar(nd=3)).appendField( self.x.slice(nd=[0,1,2]).div() ) )
 
 
-def makeSystem(vf=None,pf=None, **kwargs):
-    """
-    Create functions for residual and Jacobian matrices, Boundary conditions and symmetries are imposed here. 
-    The output functions
-    Inputs:
-        vf : velocity flowField (pressure field isn't needed)
-        resNorm: If True, return residual norm
-    
+    def makeSystem(self,ff):
+        """
+        makeSystem(self)
+        Create functions for residual and Jacobian matrices, Boundary conditions and symmetries are imposed here. 
+        Outputs:
+            residualBC: 1-d array
+            jacobianBC: 2-d array"""
+        sigma1= self.attributes['sigma1']; sigma3 = self.attributes['sigma3']
+        vf = ff.slice(nd=[0,1,2]); pf = ff.getScalar(nd=3)
+        N = vf.N; N4 = 4*N
+        L = vf.nx//2; M = vf.nz//2
         
-    Outputs:
-        residualBC: 1-d array
-        jacobianBC: 2-d array"""
-    sigma1=False 
-    N = vf.N; N4 = 4*N
-    L = vf.nx//2; M = vf.nz//2
-    sigma1 = kwargs['sigma1']; complexType = np.complex ; sigma2 = kwargs['sigma2']
-    realValued = kwargs['realValued']
-    nz1 = vf.nz; nx1 = vf.nx
-    if sigma1: nz1 = M+1
-    if sigma2 or realValued: nx1 = L+1
+        nz1 = vf.nz
+        if sigma1: nz1 = M+1
+        nx1 = L+1
 
-    if pf is None:
-        pf = vf.getScalar().zero()
+        J = self.linr()  # Get Lmat
+        self.jcbn(Lmat=J)    # Add non-linear jacobian to Lmat
         
-    J = linr(vf.flowDict, sigma1=sigma1,sigma2=sigma2, realValued=realValued)  # Get Lmat
-    jcbn(vf, Lmat=J, sigma1=sigma1,sigma2=sigma2, realValued = realValued)    # Add non-linear jacobian to Lmat
-    F = (vf.residuals(pField=pf).appendField( vf.div() ) ).copyArray()[0,:nx1,:nz1] 
-    if realValued:
-        # Split residuals into real and imaginary parts
-        F1  = np.zeros((nx1, nz1, 4,2,N),dtype=np.float)
-        F1[:,:,:,0] = np.real(F)
-        F1[:,:,:,1] = np.imag(F)
-        F = F1
+        if sigma3: NN = np.int(np.ceil(N/2.))
+        else: NN = N
+        
+        F = self._ff2symarr(vf.residuals(pField=pf).appendField( vf.div() ) )
 
-    F = F.flatten()
-
-
-    
-    # Some simple checks
-    assert (F.ndim == 1) and (J.ndim == 2)
-    # assert (J.shape[0] == nx1*nz1*N4) and (F.size == nx1*nz1*N4)
-    if not realValued: 
-        BCrows = N4*np.arange(nx1*nz1).reshape((nx1*nz1,1)) + np.array([0,N-1,N,2*N-1,2*N,3*N-1]).reshape((1,6))
-    else:
+        # Some simple checks
+        assert (F.ndim == 1) and (J.ndim == 2)
         # When realValued, each mode is split into real and imaginary parts, 
         #   so BCs on each Fourier mode block to be applied on 0,N-1,N,...,5*N, 6*N-1
-        BCrows0 = 8*N*np.arange((L+1)*nz1).reshape(((L+1)*nz1,1))
-        BCrows1 = N*np.arange(6).reshape((6,1)) + np.array([0,N-1]).reshape((1,2))
-        BCrows1 = BCrows1.reshape((1,12))
+        BCrows0 = 8*NN*np.arange((L+1)*nz1).reshape(((L+1)*nz1,1))
+        if sigma3:
+            # BCs on real and imag, but only at y=1, because y=-1 isn't part of the vector
+            BCrows1 = N*np.arange(6).reshape((1,6))
+        else:
+            BCrows1 = N*np.arange(6).reshape((6,1)) + np.array([0,N-1]).reshape((1,2))
+            BCrows1 = BCrows1.reshape((1,12))
         BCrows = BCrows0 + BCrows1
-                
-    BCrows = BCrows.flatten()
+                    
+        BCrows = BCrows.flatten()
 
-    jacobianBC = J
-    
-    jacobianBC[BCrows,:] = 0.
-    jacobianBC[BCrows,BCrows] = 1.
-    # Equations on boundary nodes now read 1*u_{lm} = .. , 1*v_{lm} = .., 1*w_{lm} = ..
-    # The RHS for the equations is set in residualBC below
-    F[BCrows] = 0.
-    # The residuals are zero because the correction, dx in J*dx = -F, should not change velocity BCs
+        J[BCrows,:] = 0.
+        J[BCrows,BCrows] = 1.
+        # Equations on boundary nodes now read 1*u_{lm} = .. , 1*v_{lm} = .., 1*w_{lm} = ..
+        # The RHS for the equations is set in residualBC below
+        F[BCrows] = 0.
+        # The residuals are zero because the correction, dx in J*dx = -F, should not change velocity BCs
 
-    return jacobianBC, F 
+        return J, F 
 
 
-def lineSearch(normFun,x0,dx,arr=None):
-    print("Beginning line search.... Initial residual norm is ",normFun(x0))
-    if arr is None:
-        arr = np.arange(-0.5,2.1,0.1)
-    else:
-        arr = np.array(arr).flatten()
+    def lineSearch(self,normFun,x0,dx,arr=None):
+        print("Beginning line search.... Initial residual norm is ",normFun(x0))
+        if arr is None:
+            arr = np.arange(-0.5,2.1,0.1)
+        else:
+            arr = np.array(arr).flatten()
 
-    normArr = np.ones(arr.size)
-    for k in range(arr.size):
-        q = arr[k]
-        normArr[k] = normFun(x0+q*dx)
+        normArr = np.ones(arr.size)
+        for k in range(arr.size):
+            q = arr[k]
+            normArr[k] = normFun(x0+q*dx)
 
-    kMin = np.argmin(normArr)
-    normMin = normArr[kMin]
-    qMin = arr[kMin]
+        kMin = np.argmin(normArr)
+        normMin = normArr[kMin]
+        qMin = arr[kMin]
 
-    if arr[0] < arr[kMin] < arr[-1]:
-        arrNew = np.arange( arr[kMin-1], arr[kMin+1], (arr[kMin+1] - arr[kMin-1])/20.)
-        normArrNew = np.ones(arrNew.size)
-        for k in range(arrNew.size):
-            q = arrNew[k]
-            normArrNew[k] = normFun(x0+q*dx)
+        if arr[0] < arr[kMin] < arr[-1]:
+            arrNew = np.arange( arr[kMin-1], arr[kMin+1], (arr[kMin+1] - arr[kMin-1])/20.)
+            normArrNew = np.ones(arrNew.size)
+            for k in range(arrNew.size):
+                q = arrNew[k]
+                normArrNew[k] = normFun(x0+q*dx)
 
-        kMinNew = np.argmin(normArrNew)
-        normMinNew = normArrNew[kMinNew]
-        qMinNew = arrNew[kMinNew]
+            kMinNew = np.argmin(normArrNew)
+            normMinNew = normArrNew[kMinNew]
+            qMinNew = arrNew[kMinNew]
 
-        round2 = True
-    else:
-        round2 = False
+            round2 = True
+        else:
+            round2 = False
 
-    print("Line search.... normArr is",normArr)
-    print("Minimal norm is obtained for q in q*dx of %.2g, producing norm of %.3g"%(qMin, normMin))
-    if round2:
-        print("Finer line search.... normArr is",normArrNew)
-        print("Minimal norm is obtained for q in q*dx of %.2g, producing norm of %.3g"%(qMinNew, normMinNew))
-        qMin = qMinNew
+        print("Line search.... normArr is",normArr)
+        print("Minimal norm is obtained for q in q*dx of %.2g, producing norm of %.3g"%(qMin, normMin))
+        if round2:
+            print("Finer line search.... normArr is",normArrNew)
+            print("Minimal norm is obtained for q in q*dx of %.2g, producing norm of %.3g"%(qMinNew, normMinNew))
+            qMin = qMinNew
 
-    oldNorm = normFun(x0); newNorm = normFun(x0+qMin*dx)
-    if newNorm > oldNorm:
-        print("New norm (%.3g) is greater than the old norm (%.3g) for some weird reason"%(newNorm,oldNorm))
+        oldNorm = normFun(x0); newNorm = normFun(x0+qMin*dx)
+        if newNorm > oldNorm:
+            print("New norm (%.3g) is greater than the old norm (%.3g) for some weird reason"%(newNorm,oldNorm))
 
-    return x0+qMin*dx
+        return x0+qMin*dx
 
 
 
-def iterate(vf=None, pf=None,iterMax= 6, tol=5.0e-14,rcond=1.0e-06,doLineSearch=True,sigma1=True,sigma2=False,chebWeight=True,realValued=False,**kwargs):
-    if ('method' in kwargs) and (kwargs['method'] in ("trf","dogbox","lm")):
-        trustRegion= True
-        method = kwargs['method']
-    elif 'method' not in kwargs:
-        trustRegion = False
-        warn('No method supplied in kwargs/argparse. Using Newton iterations with full-rank inversion and line search')
-    elif kwargs['method'] != 'simple':
-        trustReion = False
-        warn('Invalid method supplied in kwargs/argparse. Using Newton iterations with full-rank inversion and line search')
-    else:
-        trustRegion = False
+    def iterate(self):
+        """ Iterate using a method specified by 'method' in self.attributes. 
+            If method is not one of 'trf', 'dogbox', 'lm', use Newton search with full-rank inversion and linesearch.
+            IMPORTANT: keyword argument realValued is now obsolete, since it is always imposed.
+        """
+        # self.x0 is the first field used to initiate the solver. 
+        # self.x is the current flowfield. self.x need not be the same as self.x0
+        # For all iterations, use self.x. self.x0 is only for reference
+        orig_stdout = self.printLog()
+        x = self.x
+        rcond = self.attributes.get('rcond',1.0e-06)
+        method = self.attributes['method']
+        sigma1 = self.attributes['sigma1']; sigma3 = self.attributes['sigma3']
+
+        if method in ("trf","dogbox","lm"):
+            trustRegion= True
+        elif method != 'simple':
+            trustReion = False
+            warn('Invalid method supplied in kwargs/argparse. Using Newton iterations with full-rank inversion and line search')
+        else:
+            trustRegion = False
+
+        if trustRegion and importLstsq:
+        # If scipy.optimize.least_squares cannot be imported, run simple newton search
+            runTrustRegion=True
+        else:
+            runTrustRegion=False
+        
+        N = x.N; L = x.nx//2; M=x.nz//2
+        w = x.w 
+        if sigma3: 
+            NN = np.int(np.ceil(N/2.)); Nn = np.int(np.floor(N/2.))
+        else: NN = N
+        w = w[:NN]  # Because, if foldD, we are only evaluating residuals on y >= 0
+        q = np.sqrt(w)
+        qinv = 1./q
+        Q = np.diag(q)
+        Qinv = np.diag(qinv)
+        
+        def __weightJ(Jacobian):
+            for k1 in range(Jacobian.shape[0]//NN):
+                for k2 in range(Jacobian.shape[1]//NN):
+                    Jacobian[k1*NN:(k1+1)*NN, k2*NN:(k2+1)*NN] = np.dot( Q, np.dot(Jacobian[k1*NN:(k1+1)*NN, k2*NN:(k2+1)*NN], Qinv) )
+            return
+
+        def __weightF(residual):
+            for k in range(residual.size//NN):
+                residual[k*NN: (k+1)*NN] = np.dot(Q, residual[k*NN:(k+1)*NN])
+            return
+
+        def __unweightdx(deltaX):
+            for k in range(deltaX.size//NN):
+                deltaX[k*NN:(k+1)*NN] = np.dot(Qinv, deltaX[k*NN:(k+1)*NN])
+            return
+
+        if sigma3:
+            coeffArr = -M + np.arange(M+1).reshape((1,M+1, 1,1,1))
+            coeffArr = np.tile(coeffArr, (1,1,4,2,1))
+            coeffArr[:,:,:,0] += 1  # For u,v,w, real part multiplies (-1)^(m+1), imaginary multiplies (-1)^m
+            coeffArr[:,:,3] += 1    # For p, there's an extra -1 factor compared to u,v,w
 
         
+        resnormFun = lambda ff: ff.residuals().appendField(ff.div()).norm() 
 
-    if trustRegion and importLstsq:
-    # If scipy.optimize.least_squares cannot be imported, run simple newton search
-        # sigma2 = False
-        realValued=True
-        runTrustRegion=True
-    else:
-        runTrustRegion=False
-    
-    N = vf.N; L = vf.nx//2; M=vf.nz//2
-    w = clencurt(N)
-    q = np.sqrt(w)
-    qinv = 1./q
-    Q = np.diag(q)
-    Qinv = np.diag(qinv)
-    def __weightJ(Jacobian):
-        for k1 in range(Jacobian.shape[0]//N):
-            for k2 in range(Jacobian.shape[1]//N):
-                Jacobian[k1*N:(k1+1)*N, k2*N:(k2+1)*N] = np.dot( Q, np.dot(Jacobian[k1*N:(k1+1)*N, k2*N:(k2+1)*N], Qinv) )
-        return
-    def __weightF(residual):
-        for k in range(residual.size//N):
-            residual[k*N: (k+1)*N] = np.dot(Q, residual[k*N:(k+1)*N])
-        return
-    def __unweightdx(deltaX):
-        for k in range(deltaX.size//N):
-            deltaX[k*N:(k+1)*N] = np.dot(Qinv, deltaX[k*N:(k+1)*N])
-        return
+        # If eps2 != 0, force sigma3 to be false even if it is supplied as True
+        epsArr = x.flowDict['epsArr']
+        if (epsArr.size> 2) and abs( epsArr[2])> tol:
+            sigma3 = False
 
-    complexType=np.complex
-    if pf is None: pf = vf.getScalar().zero()
-    resnormFun = lambda x: x.residuals().appendField(x.div()).norm() 
+        self.x.setWallVel()
+        self.x.imposeSymms(sigma1=sigma1,sigma3=sigma3)
+        # Impose real-valuedness (by default), and sigma1, sigma3 if needed 
 
-    x = vf.appendField(pf)
+        flowDict = x.flowDict.copy()
 
-    # If eps2 != 0, force sigma2 to be false even if it is supplied as True
-    epsArr = x.flowDict['epsArr']
-    if (epsArr.size> 2) and abs( epsArr[2])> tol:
-        sigma2 = False
-        sigma3 = False
+        weights = x.w 
+        def __resFunReal(xArr):
+            ff = self._symarr2ff(xArr)
+            res = ff.residuals()
+            res = res.appendField(ff.div())
 
-    x = setSymms(x)   # Nothing fancy here. Just setting velocities at wall to zero
-    x.imposeSymms(sigma1=sigma1, sigma2=sigma2)
-    # Impose real-valuedness (by default), and sigma1, sigma2, sigma3 if supplied as kwargs 
+            # dogbox doesn't do well with rank-deficient Jacobians
+            # Rank deficiency in the problem is mainly due to the zeroth pressure mode
+            # So, to set  p_00 = 0 at both walls, instead of adding extra equations,
+            #       I'm adding these to the divergence for the last Fourier modes at the walls
+            res[0,0,0,3,0]  += np.abs(ff[0,ff.nx//2, ff.nz//2,3,0])
+            res[0,0,0,3,-1] += np.abs(ff[0,ff.nx//2, ff.nz//2,3,-1])
+            res[0,-1,-1,3,0]  += np.abs(ff[0,ff.nx//2, ff.nz//2,3,0])
+            res[0,-1,-1,3,-1] += np.abs(ff[0,ff.nx//2, ff.nz//2,3,-1])
+            # I'll try adding extra equations if this doesn't work out
+            resArr = self._ff2symarr(res)
 
-    flowDict = x.flowDict.copy()
+            return resArr.flatten()
 
-    weights = clencurt(x.N)
-    def __resFunReal(xArr):
-        if sigma1:
-            xArr = xArr.reshape((L+1, M+1,4,2*N))
-            xArrNew = np.zeros((L+1, 2*M+1, 4, 2*N),dtype=np.float)
-            xArrNew[:,:M+1] = xArr[:]
-            # Assigning coefficients for m > 0:
-            # Idea here is to get u_{l,m} = (-1)^l C.u_{l,-m}, with C = (1,1,-1,1) for u,v,w,p 
-            compArr = np.array([1., 1., -1., 1.]).reshape((1,1,4,1))
-            lArr = np.arange(-L, 1).reshape(( L+1 , 1,1,1)) 
-            # l modes go from -L to 0
-            # Assigning modes m= M to m=1 using modes m=-M to m=-1:
-            xArrNew[:, :M:-1] =  (-1.)**lArr * compArr * xArr[:, :M]
+        fnormArr=[]
+        flg = 0
+        resnorm0 = resnormFun(x)
+        if resnorm0 <= tol:
+            print("Initial flowfield has zero residual norm (%.3g). Returning..."%(resnorm0))
+            sys.stdout = orig_stdout
+            return x,np.array([resnorm0]),flg
         else:
-            xArrNew = xArr
-            
-        ff = realField2ff(arr=xArrNew,axis='x', flowDict=x.flowDict, weights=weights,cls='riblet')
-        res = ff.residuals()
-        res = res.appendField(ff.div())
-
-        # dogbox doesn't do well with rank-deficient Jacobians
-        # Rank deficiency in the problem is mainly due to the zeroth pressure mode
-        # So, to set  p_00 = 0 at both walls, instead of adding extra equations,
-        #       I'm adding these to the divergence for the last Fourier modes at the walls
-        res[0,0,0,3,0]  += np.abs(ff[0,ff.nx//2, ff.nz//2,3,0])
-        res[0,0,0,3,-1] += np.abs(ff[0,ff.nx//2, ff.nz//2,3,-1])
-        res[0,-1,-1,3,0]  += np.abs(ff[0,ff.nx//2, ff.nz//2,3,0])
-        res[0,-1,-1,3,-1] += np.abs(ff[0,ff.nx//2, ff.nz//2,3,-1])
-        # I'll try adding extra equations if this doesn't work out
-
-        resArr = res.realField(axis='x').reshape((L+1, 2*M+1, 4, 2*N))
-        if sigma1:
-            resArr = resArr[:,:M+1]
-
-        return resArr.flatten()
-
-    fnormArr=[]
-    flg = 0
-    resnorm0 = resnormFun(x)
-    if resnorm0 <= tol:
-        print("Initial flowfield has zero residual norm (%.3g). Returning..."%(resnorm0))
-        return vf,pf,np.array([resnorm0]),flg
-    else:
-        print("Initial residual norm is %.3g"%(resnorm0))
+            print("Initial residual norm is %.3g"%(resnorm0))
 
 
-    
-    print('Starting iterations...............')
-    if runTrustRegion:
-        def _symarr2ff(xArr): 
-            # Convert 1-d weighted, real, reduced array (reduced if sigma1 or sigma3) to flowFieldRiblet
-            if sigma1:
-                xArr = xArr.reshape((L+1, M+1,4,2*N))
-                xArrNew = np.zeros((L+1, 2*M+1, 4, 2*N),dtype=np.float)
-                xArrNew[:,:M+1] = xArr[:]
-                # Assigning coefficients for m > 0:
-                # Idea here is to get u_{l,m} = (-1)^l C.u_{l,-m}, with C = (1,1,-1,1) for u,v,w,p 
-                compArr = np.array([1., 1., -1., 1.]).reshape((1,1,4,1))
-                lArr = np.arange(-L, 1).reshape(( L+1 , 1,1,1)) 
-                # l modes go from -L to 0
-                # Assigning modes m= M to m=1 using modes m=-M to m=-1:
-                xArrNew[:, :M:-1] =  (-1.)**lArr * compArr * xArr[:, :M]
+        
+        print('Starting iterations...............')
+        if runTrustRegion:
+
+            def jacFun(ffArr):
+                # Return Jacobian matrix for a given state-vector
+                ff = _symarr2ff(ffArr)
+                J, F = self.makeSystem(ff)
+                return J
+                    
+            if self.attributes.get('supplyJac',True):
+                jac = jacFun
             else:
-                xArrNew = xArr
-                
-            return realField2ff(arr=xArrNew,axis='x', flowDict=x.flowDict, weights=weights,cls='riblet')
+                jac = '2-point'
 
-        def _ff2symarr(ff):
-            # Return weighted, real, reduced (if sigma1 or sigma3) 1d-array from flowfield
-            ffArr = ff.realField(axis='x')
-            if sigma1:
-                ffArr = ffArr.reshape((L+1, 2*M+1, 4, 2*N))
-                ffArr = ffArr[:,:M+1].flatten()
-            return ffArr
+            max_nfev = self.attributes['iterMax']
+            method = self.attributes['method']
+            if method=='lm':
+                bounds = (-np.inf,np.inf)
+                max_nfev *= (self._ff2symarr(self.x).size//2)
+            else:
+                bounds = (-1.,1.)
+                if method =='trf': max_nfev += 1
+                else: max_nfev = np.int(1.5*max_nfev)
 
-        def jacFun(ffArr):
-            # Return Jacobian matrix for a given state-vector
-            ff = _symarr2ff(xArr)
-            J, F = makeSystem(vf=ff.slice(nd=[0,1,2]), pf=ff.getScalar(nd=3),sigma1=sigma1,sigma2=sigma2, realValued=realValued)
-            return J
-                
-        if ('supplyJac' in kwargs) and kwargs['supplyJac']:
-            jac = jacFun
-        else:
-            jac = '2-point'
+            x0Arr = self._ff2symarr(self.x)
 
-        if ('method' in kwargs) and (kwargs['method'] == 'lm'):
-            bounds = (-np.inf,np.inf)
-        else:
-            bounds = (-1.,1.)
-
-        x0Arr = _ff2symarr(x)
-
-        optRes = least_squares(__resFunReal, x0Arr,jac=jac,bounds=bounds,verbose=2,**kwargs)
-       
-        xArr = optRes.x
-        xNew = _symarr2ff(xArr)
-        
-        return xNew.slice(nd=[0,1,2]), xNew.getScalar(nd=3), optRes.cost, optRes.status
-
-
-
-    for n in range(iterMax):
-        print('iter:',n+1)
-
-
-        # Ensure BCs on vf, and field is real-valued
-        vf = x.slice(nd=[0,1,2]); pf = x.slice(nd=3)
-
-
-        J, F = makeSystem(vf=vf, pf=pf,sigma1=sigma1,sigma2=sigma2, realValued=realValued)
-                
-        sys.stdout.flush()
-
-        # Weight Jacobian and residual matrices for clencurt weighing
-        if chebWeight:
-            __weightJ(J)
-            __weightF(F)
-        
-        dx, linNorm, jRank,sVals = np.linalg.lstsq(J,-F,rcond=rcond)
-        linNorm = chebnorm(np.dot(J,dx) + F, x.N)
-        print('Jacobian inversion returned with residual norm:',linNorm)
-    
-        if chebWeight:
-            __unweightdx(dx)
+            optRes = least_squares(__resFunReal, x0Arr,jac=jac,bounds=bounds,verbose=2,method=method,max_nfev=max_nfev)
+           
+            xArr = optRes.x
+            xNew = self._symarr2ff(xArr)
             
-        nz1 = x.nz; nx1 = x.nx
-        M = x.flowDict['M']; L = x.flowDict['L']; N = x.N
-        if sigma1: nz1 = M + 1
-        if sigma2: nx1 = L + 1
+            self.x = xNew
+            sys.stdout = orig_stdout
+            return xNew, optRes.cost, optRes.status
 
-        # If realValued, dx has real entries 
-        # Let's turn this into the usual complex array
-        if realValued:
-            dx1 = dx.copy()
-            dx = np.zeros((L+1, nz1, 4,N), dtype=x.dtype)
-            dx1 = dx1.reshape((L+1, nz1, 4, 2, N))
-            dx[:] = dx1[:,:,:,0] + 1.j*dx1[:,:,:,1] # real part + i * imaginary part
-            nx1 = L+1
-            # Now dx is complex-valued and has modes l=-L to 0 , and m -M to 0 or M (depending on sigma1)
-        dx = dx.reshape((nx1, nz1, 4, x.N))
 
-        dxff = x.zero()     # Cast dx to this flowFieldRiblet instance
-        dxff[0,:nx1,:nz1] = dx      # If symmetries imposed, copy negative Fourier modes as are
-        # If no symmetries were imposed, this is it. 
+        for n in range(iterMax):
+            saveDir = self.attributes['saveDir']
+            workingDir = os.getcwd()
+            if saveDir is not None:
+                saveDir = str(saveDir)
+                if os.path.exists(saveDir): saveSolns = True
+                else:
+                    try: 
+                        os.makedirs(saveDir)
+                        saveSolns = True
+                    except:
+                        saveSolns = False
+                    
 
-        # Even if realValued, use the same de-folding for sigma1
-        if sigma1:
-            # Assigning coefficients for m > 0:
-            # Idea here is to get u_{l,m} = (-1)^l C.u_{l,-m}, with C = (1,1,-1,1) for u,v,w,p 
-            compArr = np.array([1., 1., -1., 1.]).reshape((1,1,4,1))
-            lArr = np.arange(-L, nx1-L).reshape(( nx1 , 1,1,1)) 
-            # l modes go from -L to L if sigma2 is not imposed, and from -L to 1 if it is
-            # Assigning modes m= M to m=1 using modes m=-M to m=-1:
-            dxff[0, :nx1, :M:-1] =  (-1.)**lArr * compArr * dxff[0,:nx1, :M:-1]
-        if sigma2:
-            # Assigning coefficients for m > 0:
-            # Idea here is to get u_{l,m}(y) = (-1)^(l+m) C.u_{-l,m}(-y), with C= (-1,-1,1,1) for u,v,w,p 
-            compArr = np.array([-1.,-1., 1., 1.]).reshape((1,1,4,1))
-            # sigma1 already accounted for, so the modes that need to be assigned are
-            #   m in {-M,M}, and l > 0. So, 
-            mArr = np.arange(-M, M+1).reshape((1,x.nz,1,1))
-            lArr = np.arange(-L, 0).reshape(( L , 1,1,1))
-            # Assigning modes l=-L to l=-1 to l=L to l=1, with coefficient at -y assigned to y
-            dxff[0, :L:-1] =  (-1.)**(lArr+mArr) * compArr * dxff[0,:L, :, :, ::-1]
+            print('iter:',n+1)
 
-        if realValued:
-            # Assign l>0 using complex conjugacy instead of the sigma2 relation
-            dxff[0,:L:-1, ::-1] = np.conjugate(dxff[0,:L])
-            # LHS: l from L to 1, m from M to -M
-            # RHS: l from -L to -1, m from -M to M, it's complex conjugate
-        # Now dxff is all sorted out
 
-        
-        # Ensuring correction fields are real-valued and obey the required symmetries
-        # imposeSymms has realValued=True by default
-        dxff.imposeSymms(sigma1=sigma1, sigma2=sigma2)
-        dxff[0,:,:,:3,[0,-1]] = 0.   # Correction field should not change velocity BCs, for Couette or channel flow
+            # Ensure BCs on vf, and field is real-valued
+            J, F = self.makeSystem(self.x)
+                    
+            sys.stdout.flush()
 
-        if doLineSearch:
-            x = lineSearch(resnormFun, x, dxff)
-        else:
-            x += dxff
-       
-        # I don't have to keep using imposeSymms(), but it doesn't reduce performance, so might as well
-        x.imposeSymms(sigma1=sigma1, sigma2=sigma2)
-        
-
-        fnorm = resnormFun(x)
-        print('Residual norm after %d th iteration is %.3g'%(n+1,fnorm))
-        sys.stdout.flush()
-        
-        fnormArr.append(fnorm)
-        if fnorm <= tol:
-            flg = 0
-            print('Converged in ',n+1,' iterations. Returning....................................')
-            return x.slice(nd=[0,1,2]), x.getScalar(nd=3), np.array(fnormArr), flg
-        
-        if n>0:
-            if fnormArr[n] > fnormArr[n-1]:
-                flg = 1
-                print('Residual norm is increasing:',fnormArr)
-                #print('Returning with initial velocity and pressure fields')
-                #return vf0, pf0, np.array(fnormArr),flg
-        
-        print('*********************************************************')
-    else:
-        if fnormArr[-1] > 100.*tol:
-            print('Iterations have not converged for iterMax=',iterMax)
-            print('fnormArr is ',fnormArr)
-            flg = -1
-    return x.slice(nd=[0,1,2]), x.getScalar(nd=3), np.array(fnormArr), flg
-
-def shearStress(vf):
-    """ Returns averaged shear stress at the bottom wall
-    NOTE: For Couette flow, stress at the walls is opposite in sign, while
-        they have the same sign for Poiseuille flow. So the stress at only one wall
-        is considered here
-    Inputs: 
-        vf: velocity flowFieldRiblet (can include pressure)
-    Returns:
-        avgShearStress: scalar
-    """
-    # Building a function that can be handed to scipy.integrate
-    u = vf.slice(L=0).getScalar()
-    uy = u.ddy(); uz = u.ddz()
-    assert u.nx == 1
-    eps = vf.flowDict['eps']; a = vf.flowDict['alpha']; b = vf.flowDict['beta']
-    
-    # I don't need the following code, but I'll keep it just in case I need it later 
-    if True:
-        avgStrainRate = (1.+2.*eps**2 * b**2)*np.real(uy[0,uy.nx//2, uy.nz//2, 0, -1]) \
-                - eps * b**2 * np.real(u[0, u.nx//2, u.nz//2 + 1, 0, -1])\
-                - eps**2 * b**2 * np.real(uy[0, uy.nx//2, uy.nz//2+2, 0, -1])
-        avgStrainRate = np.real(avgStrainRate)
-    else:
-
-        # Arrays for storing the values of Fourier mdoes at the walls
-        uzWall = np.zeros(vf.nz,dtype=np.complex)
-        uyWall = uzWall.copy()
-
-        uzWall[:] = uz[0,0,:, 0,-1]  
-        uyWall[:] = uy[0,0,:, 0,-1]
-
-        mArr = np.arange(-(vf.nz//2), vf.nz//2+1)
-        def _ifftWall(zLoc,ffWall):
-            """ Returns value of field 'ff' at the wall when Fourier coefficients
-                at the wall 'ffWall' are supplied. 
-            Inputs:
-                zLoc: locations in zLoc, can be array
-                ffWall: coefficients at the wall
-            Returns:
-                ffArr, array if zLoc is input as array
-                """
-            zLoc = np.array([zLoc]).flatten()
-            zLoc = zLoc.reshape((zLoc.size,1))
-
-            ffWall = ffWall.reshape((1,u.nz))
-            ffVals = np.real(np.sum(ffWall*np.exp(1.j*mArr*b*zLoc),axis=1))
-            return ffVals.flatten()
-
-        def _strainRateFun(zLoc,uyw,uzw):
-            """ Local strain rate, du_t/dn"""
-            zLoc = np.array([zLoc]).flatten()
-            sr = np.zeros(zLoc.shape) 
-
-            # Local strain-rate du/dn, n:normal coordinate
-            # du/dn = e_n.e_y * u_y + e_n.e_z * u_z 
-            # e_n.e_y = 1/sqrt{1+ (2*eps*b*sin(b*z))^2 }        
-            # e_n.e_z = 2*eps*b*sin(bz)/sqrt{1+ (2*eps*b*sin(b*z))^2 }        
-            # There is also a dt in the integral (arc-length along the surface)
-            #   and dt = sqrt{ 1 + (2*eps*b*sin(b*z))^2 }, which cancels out the 
-            #   sqrt in the denominator of the dot products
+            # Weight Jacobian and residual matrices for clencurt weighing
+            if chebWeight:
+                __weightJ(J)
+                __weightF(F)
             
-            # e_n.e_y * u_y (without the sqrt denominator)
-            sr += _ifftWall(zLoc,uyw)
-            # e_n.e_z * u_z (without the sqrt denominator)
-            sr += 2.*eps*b*np.sin(b*zLoc) * _ifftWall(zLoc,uzw)
+            dx, linNorm, jRank,sVals = np.linalg.lstsq(J,-F,rcond=rcond)
+            linNorm = chebnorm(np.dot(J,dx) + F, x.N)
+            print('Jacobian inversion returned with residual norm:',linNorm)
+       
+            dxff = self._symarr2ff(dx)
+            # Ensuring correction fields are real-valued and obey the required symmetries
+            # imposeSymms has realValued=True by default
+            dxff.imposeSymms(sigma1=self.attributes['sigma1'], sigma2=self.attributes['sigma3'])
+            dxff[0,:,:,:3,[0,-1]] = 0.   # Correction field should not change velocity BCs, for Couette or channel flow
 
-            return sr
+            self.x = lineSearch(resnormFun, self.x, dxff)
+           
+            # I don't have to keep using imposeSymms(), but it doesn't reduce performance, so might as well
+            self.x.imposeSymms(sigma1=sigma1, sigma2=sigma2)
 
-        strainRate = lambda zLoc: _strainRateFun(zLoc,uyWall, uzWall)
+            if saveSolns:
+                if 'counter' not in self.x.flowDict:
+                    self.x.flowDict['counter'] = 0
+                savePath = workingDir + saveDir
+                self.x.saveh5(prefix=savePath, fNamePrefix=self.attributes['prefix']+'_'+self.x.flowDict['counter']+'_')
 
-        Lz = 2.*np.pi/b
 
-        # Integrating du/dn * dt from z=0 to 2*pi/b:
-        integratedStrainRate = spint.quad(strainRate, 0., Lz, epsabs = 1.0e-08, epsrel=1.0e-05)[0]
-        # e_t.e_x * ds = dx, so don't have to worry about that bit. 
+            fnorm = resnormFun(self.x)
+            print('Residual norm after %d th iteration is %.3g'%(n+1,fnorm))
+            sys.stdout.flush()
+            
+            fnormArr.append(fnorm)
+            if fnorm <= tol:
+                flg = 0
+                print('Converged in ',n+1,' iterations. Returning....................................')
+                sys.stdout = orig_stdout
+                return x, np.array(fnormArr), flg
+            
+            if n>0:
+                if fnormArr[n] > fnormArr[n-1]:
+                    flg = 1
+                    print('Residual norm is increasing:',fnormArr)
+            
+            print('*********************************************************')
+        else:
+            if fnormArr[-1] > 100.*tol:
+                print('Iterations have not converged for iterMax=',iterMax)
+                print('fnormArr is ',fnormArr)
+                flg = -1
+        sys.stdout = orig_stdout
+        return self.x, np.array(fnormArr), flg
+
+    def shearStress(self):
+        """ Returns averaged shear stress at the bottom wall
+        NOTE: For Couette flow, stress at the walls is opposite in sign, while
+            they have the same sign for Poiseuille flow. So the stress at only one wall
+            is considered here
+        Inputs: 
+            vf: velocity flowFieldRiblet (can include pressure)
+        Returns:
+            avgShearStress: scalar
+        """
+        vf = self.x.slice(nd=[0,1,2])
+        # Building a function that can be handed to scipy.integrate
+        u = vf.slice(L=0).getScalar()
+        uy = u.ddy(); uz = u.ddz()
+        assert u.nx == 1
+        eps = vf.flowDict['eps']; a = vf.flowDict['alpha']; b = vf.flowDict['beta']
         
-        #  Dividing by streamwise wavelength to get the force per unit area (spanwise homogeneous)
-        avgStrainRate = integratedStrainRate/Lz
-    
-    avgShearStress = avgStrainRate/vf.flowDict['Re']    # Follows from non-dimensionalization
+        # I don't need the following code, but I'll keep it just in case I need it later 
+        if True:
+            avgStrainRate = (1.+2.*eps**2 * b**2)*np.real(uy[0,uy.nx//2, uy.nz//2, 0, -1]) \
+                    - eps * b**2 * np.real(u[0, u.nx//2, u.nz//2 + 1, 0, -1])\
+                    - eps**2 * b**2 * np.real(uy[0, uy.nx//2, uy.nz//2+2, 0, -1])
+            avgStrainRate = np.real(avgStrainRate)
+        else:
 
-    return avgShearStress
+            # Arrays for storing the values of Fourier mdoes at the walls
+            uzWall = np.zeros(vf.nz,dtype=np.complex)
+            uyWall = uzWall.copy()
+
+            uzWall[:] = uz[0,0,:, 0,-1]  
+            uyWall[:] = uy[0,0,:, 0,-1]
+
+            mArr = np.arange(-(vf.nz//2), vf.nz//2+1)
+            def _ifftWall(zLoc,ffWall):
+                """ Returns value of field 'ff' at the wall when Fourier coefficients
+                    at the wall 'ffWall' are supplied. 
+                Inputs:
+                    zLoc: locations in zLoc, can be array
+                    ffWall: coefficients at the wall
+                Returns:
+                    ffArr, array if zLoc is input as array
+                    """
+                zLoc = np.array([zLoc]).flatten()
+                zLoc = zLoc.reshape((zLoc.size,1))
+
+                ffWall = ffWall.reshape((1,u.nz))
+                ffVals = np.real(np.sum(ffWall*np.exp(1.j*mArr*b*zLoc),axis=1))
+                return ffVals.flatten()
+
+            def _strainRateFun(zLoc,uyw,uzw):
+                """ Local strain rate, du_t/dn"""
+                zLoc = np.array([zLoc]).flatten()
+                sr = np.zeros(zLoc.shape) 
+
+                # Local strain-rate du/dn, n:normal coordinate
+                # du/dn = e_n.e_y * u_y + e_n.e_z * u_z 
+                # e_n.e_y = 1/sqrt{1+ (2*eps*b*sin(b*z))^2 }        
+                # e_n.e_z = 2*eps*b*sin(bz)/sqrt{1+ (2*eps*b*sin(b*z))^2 }        
+                # There is also a dt in the integral (arc-length along the surface)
+                #   and dt = sqrt{ 1 + (2*eps*b*sin(b*z))^2 }, which cancels out the 
+                #   sqrt in the denominator of the dot products
+                
+                # e_n.e_y * u_y (without the sqrt denominator)
+                sr += _ifftWall(zLoc,uyw)
+                # e_n.e_z * u_z (without the sqrt denominator)
+                sr += 2.*eps*b*np.sin(b*zLoc) * _ifftWall(zLoc,uzw)
+
+                return sr
+
+            strainRate = lambda zLoc: _strainRateFun(zLoc,uyWall, uzWall)
+
+            Lz = 2.*np.pi/b
+
+            # Integrating du/dn * dt from z=0 to 2*pi/b:
+            integratedStrainRate = spint.quad(strainRate, 0., Lz, epsabs = 1.0e-08, epsrel=1.0e-05)[0]
+            # e_t.e_x * ds = dx, so don't have to worry about that bit. 
+            
+            #  Dividing by streamwise wavelength to get the force per unit area (spanwise homogeneous)
+            avgStrainRate = integratedStrainRate/Lz
+        
+        avgShearStress = avgStrainRate/vf.flowDict['Re']    # Follows from non-dimensionalization
+
+        return avgShearStress
 
 
 
-def averagedU(vf,nd=0, zArr = None, ny = 50):
-    """ Velocity averaged in wall-parallel directions in physical domain"""
-    b = vf.flowDict['beta']; Lz = 2.*np.pi/b
-    epsArr = vf.flowDict['epsArr']
-    if zArr is None:
-        # Use 500 z-points for averaging
-        nz = 500.
-        zArr = np.arange(0., Lz, Lz/nz)
-    
-    
-    yWalls = np.zeros(zArr.size)
-    # Wall contour
-    for k in range(epsArr.size):
-        eps = epsArr[k]
-        yWalls  += 2.*eps*np.cos(k*b*zArr)
-    yMax = np.amax(yWalls); yMin = np.amin(yWalls)
-    # At each z location, flowfield class assumes y goes from -1 to 1, 
-    #    but it actually goes from -1+yWalls to 1+yWalls
-    # I want the velocity profile going from -1+yMax to 1+yMin
-    # To keep things simple, I'll use a uniform grid between -1+yMax and 1+yMin
-    # At any z, I will need to interpolate the velocity from 
-    #      -1 + (yMax -yWalls(z)) to
-    #       1 - (yWalls(z) -yMin)
-    # Let's define yb = -1 + (yMax - yWalls(z) )  and yt = 1 - (yWalls(z) - yMin)
-    yb = -1. + yMax - yWalls
-    yt = 1.  + yMin - yWalls
-    
-    vfArr = vf.getScalar(nd=nd).slice(L=0).copyArray()[0,0,:,0]  
-    # Don't need l !=0 modes in averaging
-    mArr = np.arange(-(vf.nz//2), vf.nz//2 +1).reshape((vf.nz,1))
-    
-    def _ifftAvgU(zLoc,yArr):
-        # First, getting field on cheb nodes at zLoc:
-        vTemp = np.real(np.sum( vfArr* np.exp(1.j*mArr*b*zLoc) , axis=0))
-        # Interpolating onto the new grid, yArr and returning
-        return chebint(vTemp,yArr)
-    
-    # Now, start with a zero array,
-    vArr = np.zeros(ny+1)
-    for k in range(zArr.size):
-        yLocs = np.arange(yb[k], 1.0001*yt[k], (yt[k]-yb[k])/ny )
-        vArr += _ifftAvgU(zArr[k], yLocs)
-    
-    vArr = vArr/zArr.size
-    
-    yArr = np.arange(-1.+yMax, 1.0001*(1.+yMin), (2+yMin-yMax)/ny)
-    
-    return yArr, vArr
+    def averagedU(self,nd=0, zArr = None, ny = 50):
+        """ Velocity averaged in wall-parallel directions in physical domain"""
+        vf = self.x.slice(nd=[0,1,2])
+        b = vf.flowDict['beta']; Lz = 2.*np.pi/b
+        epsArr = vf.flowDict['epsArr']
+        if zArr is None:
+            # Use 500 z-points for averaging
+            nz = 500.
+            zArr = np.arange(0., Lz, Lz/nz)
+        
+        
+        yWalls = np.zeros(zArr.size)
+        # Wall contour
+        for k in range(epsArr.size):
+            eps = epsArr[k]
+            yWalls  += 2.*eps*np.cos(k*b*zArr)
+        yMax = np.amax(yWalls); yMin = np.amin(yWalls)
+        # At each z location, flowfield class assumes y goes from -1 to 1, 
+        #    but it actually goes from -1+yWalls to 1+yWalls
+        # I want the velocity profile going from -1+yMax to 1+yMin
+        # To keep things simple, I'll use a uniform grid between -1+yMax and 1+yMin
+        # At any z, I will need to interpolate the velocity from 
+        #      -1 + (yMax -yWalls(z)) to
+        #       1 - (yWalls(z) -yMin)
+        # Let's define yb = -1 + (yMax - yWalls(z) )  and yt = 1 - (yWalls(z) - yMin)
+        yb = -1. + yMax - yWalls
+        yt = 1.  + yMin - yWalls
+        
+        vfArr = vf.getScalar(nd=nd).slice(L=0).copyArray()[0,0,:,0]  
+        # Don't need l !=0 modes in averaging
+        mArr = np.arange(-(vf.nz//2), vf.nz//2 +1).reshape((vf.nz,1))
+        
+        def _ifftAvgU(zLoc,yArr):
+            # First, getting field on cheb nodes at zLoc:
+            vTemp = np.real(np.sum( vfArr* np.exp(1.j*mArr*b*zLoc) , axis=0))
+            # Interpolating onto the new grid, yArr and returning
+            return chebint(vTemp,yArr)
+        
+        # Now, start with a zero array,
+        vArr = np.zeros(ny+1)
+        for k in range(zArr.size):
+            yLocs = np.arange(yb[k], 1.0001*yt[k], (yt[k]-yb[k])/ny )
+            vArr += _ifftAvgU(zArr[k], yLocs)
+        
+        vArr = vArr/zArr.size
+        
+        yArr = np.arange(-1.+yMax, 1.0001*(1.+yMin), (2+yMin-yMax)/ny)
+        
+        return yArr, vArr
     
     
 
@@ -1005,89 +1032,68 @@ def averagedU(vf,nd=0, zArr = None, ny = 50):
     
 
 
-def testExactRibletModule(L=4,M=7,N=35,epsArr=np.array([0.,0.05,0.02,0.03]),sigma1=True,sigma2=False,complexType=np.complex,realValued=False):
-    print('Testing for symmetries sigma1=%r and sigma2=%r to tolerance %.3g'%(sigma1,sigma2,tol))
-    vf = h52ff('testFields/eq1.h5')
-    pf = h52ff('testFields/pres_eq1.h5',pres=True)
-    vf = vf.slice(L=L,M=M,N=N); pf = pf.slice(L=L,M=M,N=N)
-    vf.flowDict.update({'epsArr':epsArr}); pf.flowDict.update({'epsArr':epsArr})
-    nex = 5 # Padding flowField with extra modes for anti-aliasing
-    vf1 = vf.slice(L=vf.nx//2+nex, M = vf.nz//2+nex)
-    pf1 = pf.slice(L=vf.nx//2+nex, M = vf.nz//2+nex)
+def testExactRibletModule(ffProb):
+    sigma1 = ffProb.attributes['sigma1']; sigma3 = ffProb.attributes['sigma3']; 
+    x = ffProb.x 
+    tol = ffProb.attributes['tol']
+    print('Testing for symmetries sigma1=%r and sigma3=%r to tolerance %.3g'%(sigma1,sigma3,tol))
+    print('epsArr is ', x.flowDict['epsArr'])
+   
+    x1 = x.slice(L=x.nx//2+5, M=x.nz//2+5)    # Up-slicing to avoid aliasing effects
+    vf1 = x.slice(nd=[0,1,2]); pf1 = x.slice(nd=[3])
     
-    # Reducing state-vector if symmetries are imposed
-    x = vf.appendField(pf)
-    
-    xArr = x.copyArray()[0]
-    if sigma1:
-        xArr = xArr[:,:x.nz//2+1]
-    if sigma2:
-        xArr = xArr[:x.nx//2+1]
-    if realValued:
-        if sigma2: warn("Don't impose both sigma2 and realValued")
-        xArrReal = np.zeros((x.nx//2+1, xArr.shape[1],4,2,N),dtype=np.float)
-        xArrReal[:,:,:,0] = np.real(xArr[:x.nx//2+1])
-        xArrReal[:,:,:,1] = np.imag(xArr[:x.nx//2+1])
-        xmr_ = xArrReal.flatten()
-    xm_ = xArr.flatten()
+    if sigma3: NN = np.int(np.ceil(x.N/2.))
+    else: NN = x.N
+    w = x.w 
+    w = w[:NN]  # Because, if foldD, we are only evaluating residuals on y >= 0
+    q = np.sqrt(w); qinv = 1./q;  Q = np.diag(q);  Qinv = np.diag(qinv)
+    def __weightJ(Jacobian):
+        for k1 in range(Jacobian.shape[0]//NN):
+            for k2 in range(Jacobian.shape[1]//NN):
+                Jacobian[k1*NN:(k1+1)*NN, k2*NN:(k2+1)*NN] = np.dot( Q, np.dot(Jacobian[k1*NN:(k1+1)*NN, k2*NN:(k2+1)*NN], Qinv) )
+        return
 
+    # Reduced state-vector (weighted numpy array):
+    xm_ = ffProb._ff2symarr(ffProb.x)
     
     # Calculating linear matrix, and the product with state-vector
-    Lmat = linr(vf.flowDict,sigma1=sigma1,sigma2=sigma2,realValued=realValued)
-    if realValued:
-        linTermTemp = np.dot(Lmat, xmr_).reshape(xArrReal.shape)
-        linTerm = xArr[:x.nx//2+1].copy()
-        linTerm[:] = 0.
-        linTerm[:] = linTermTemp[:,:,:,0] + 1.j*linTermTemp[:,:,:,1]
-        linTerm = linTerm.flatten()
-    else:
-        linTerm = np.dot(Lmat, xm_)
+    Lmat = ffProb.linr()
+    LmatUnweighted = Lmat.copy()
+    __weightJ(Lmat)
+    linTerm = np.dot(Lmat, xm_)
+    Lmat = LmatUnweighted
 
     # Calculating linear term from class methods
     linTermClass = (vf1.laplacian()/(-1.*vf1.flowDict['Re']) + pf1.grad()).appendField(vf1.div())
-    linTermClass = linTermClass.slice(L=vf.nx//2, M=vf.nz//2)
+    linTermClass = linTermClass.slice(L=x.nx//2, M=x.nz//2)
 
 
     # Calculating non-linear matrix, and its product with the state-vector
     Lmat0 = Lmat.copy()
     #Lmat= np.zeros((xm_.size,xm_.size),dtype=np.complex)
-    jcbn(vf,Lmat=Lmat,sigma1=sigma1,sigma2=sigma2,realValued=realValued)
-    Lmat = Lmat-Lmat0
-    if realValued:
-        NLtermTemp = 0.5*np.dot(Lmat, xmr_).reshape(xArrReal.shape)
-        NLterm = xArr[:x.nx//2+1].copy()
-        NLterm[:] = 0.
-        NLterm[:] = NLtermTemp[:,:,:,0] + 1.j*NLtermTemp[:,:,:,1]
-        NLterm = NLterm.flatten()
-    else:
-        NLterm = 0.5*np.dot(Lmat, xm_)
+    ffProb.jcbn(ffProb.x,Lmat=Lmat)
+    Lmat -= Lmat0   
+    __weightJ(Lmat)
+    NLterm = 0.5*np.dot(Lmat, xm_)
 
     # Calculating non-linear term from class methods
     NLtermClassFine = vf1.convNL()
-    NLtermClass = NLtermClassFine.slice(L=vf.nx//2, M=vf.nz//2).appendField(pf.zero())
+    NLtermClass = NLtermClassFine.slice(L=x.nx//2, M=x.nz//2).appendField(x.getScalar().zero())
 
 
     # Reducing terms from class methods so positive Fourier modes are discarded according to sigma1,sigma2
-    linResArr = linTermClass.copyArray()[0]
-    NLresArr = NLtermClass.copyArray()[0]
-    if sigma1:
-        linResArr = linResArr[:,:x.nz//2+1]
-        NLresArr  = NLresArr[: ,:x.nz//2+1]
-    if sigma2 or realValued:
-        linResArr = linResArr[:x.nx//2+1]
-        NLresArr  = NLresArr[ :x.nx//2+1]
-    linResm_ = linResArr.flatten()
-    NLresm_  = NLresArr.flatten()
+    linTermMat = ffProb._symarr2ff(linTerm)
+    NLtermMat  = ffProb._symarr2ff(NLterm)
     
-    linResNorm = chebnorm(linTerm - linResm_ , x.N)
-    NLresNorm  = chebnorm(NLterm  - NLresm_  , x.N)
+    linResNorm = (linTermMat - linTermClass).norm()
+    NLresNorm  = (NLtermMat  - NLtermClass ).norm()
 
     linTestResult = linResNorm <= tol
     NLtestResult  = NLresNorm  <= tol
     if sigma1:
         print('sigma1 invariance norm of x is', (x - x.reflectZ().shiftPhase(phiX=np.pi) ).norm())
-    if sigma2:
-        print('sigma2 invariance norm of x is', (x - x.rotateZ().shiftPhase(phiX=np.pi, phiZ=np.pi) ).norm())
+    if sigma3:
+        print('sigma3 invariance norm of x is', (x - x.pointwiseInvert().shiftPhase(phiZ=np.pi) ).norm())
     
     if not linTestResult :
         print('Residual norm for linear is:',linResNorm)

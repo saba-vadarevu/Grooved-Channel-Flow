@@ -749,6 +749,7 @@ class flowFieldRiblet(flowFieldWavy):
         obj.Tz2 = Tz2
         return obj
 
+
     def verify(self):
         """Overloading flowFieldWavy.verify() to account for epsArr (for multiple surface modes)
         """
