@@ -1,0 +1,1 @@
+python3 -u ../runEq.py 5 6 25 --eps1 0.03 --sigma1 --no-sigma3  --prefix ribEq1 --method simple --jacobian --log terminal

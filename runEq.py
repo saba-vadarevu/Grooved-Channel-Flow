@@ -1,4 +1,3 @@
-from exactRiblet import *
 import os
 import argparse
 import resource 
@@ -6,6 +5,11 @@ import sys
 import time
 import datetime
 from warnings import warn
+
+sys.path.append('../')
+import exactRiblet as rib
+import numpy as np
+from flowFieldWavy import *
 
 workingDir = os.getcwd() 
 if not workingDir.endswith('/'):
@@ -26,17 +30,27 @@ parser.add_argument("--eps1",help="Semi-amplitude, Optional, default: 0.0", defa
 parser.add_argument("--eps2",help="Semi-amplitude, Optional, default: 0.0", default = 0.0,type=float)
 parser.add_argument("--eps3",help="Semi-amplitude, Optional, default: 0.0", default = 0.0,type=float)
 parser.add_argument("--tol",help="Tolerance for N-R method, Optional, default: 1.0e-13", default = 1.0e-13,type=float)
-parser.add_argument("--iterMax",help="Total number of iterations, Optional, default: 15", default = 15,type=int)
-parser.add_argument("--nfevMax",help="Total number of function evals for least_squares, Optional, default=6",default=6,type=int)
+parser.add_argument("--iterMax",help="Total number of iterations, Optional, default: 6", default = 6,type=int)
 parser.add_argument("--log",help="Name of log file, Optional, default: outFile.txt (append)", default = 'outFile.txt',type=str)
 parser.add_argument("--prefix",help="fNamePrefix for solution files, Optional, default: ribEq1", default = 'ribEq1',type=str)
-parser.add_argument("--sigma1",help="Impose sigma1? Optional, default: True", default = True,type=bool)
-parser.add_argument("--sigma2",help="Impose sigma2? Optional, default: False", default = False,type=bool)
 parser.add_argument("--method",help="Method to use for solving equations,\
-        Options: 'simple' (Newton's+jacobian inversion+line search)\\
-                'trf', 'dogbox', 'lm' from scipy's least_squares", default=simple,type=str)
-parser.add_argument("--jacobian",help="Should modified Jacobian be supplied if using trf,dogbox, or lm methods? default:False",default=False,type=bool)
+        Options: 'simple' (Newton's+jacobian inversion+line search)\
+                'trf', 'dogbox', 'lm' from scipy's least_squares", default='simple',type=str)
 parser.add_argument("--fName",help="Input file name. If not supplied or invalid, use whatever .hdf5 is found",default='.hdf5',type=str)
+
+symParser1 = parser.add_mutually_exclusive_group(required=False)
+symParser2 = parser.add_mutually_exclusive_group(required=False)
+symParser3 = parser.add_mutually_exclusive_group(required=False)
+symParser1.add_argument("--no-sigma1",help="Do not impose sigma1. Imposed otherwise", dest='sigma1',action="store_false")
+symParser1.add_argument("--sigma1",help="Impose sigma1 (also the default)", dest='sigma1',action="store_true")
+symParser2.add_argument("--no-sigma3",help="Do not impose sigma3 (also the default)", dest='sigma3',action="store_false")
+symParser2.add_argument("--sigma3",help="Impose sigma3. Not imposed otherwise", dest='sigma3',action="store_true")
+symParser3.add_argument("--jacobian",help="Supply modified Jacobian if using trf,dogbox, or lm methods. Don't otherwise",dest='jacobian',action='store_true')
+symParser3.add_argument("--no-jacobian",help="Do not supply modified Jacobian if using trf,dogbox, or lm methods (default)",dest='jacobian',action='store_false')
+parser.set_defaults(sigma1=True)
+parser.set_defaults(sigma2=False)
+parser.set_defaults(jacobian=False)
+
 
 args = parser.parse_args()
 
@@ -47,28 +61,19 @@ iterMax = args.iterMax
 logName = args.log
 tol = args.tol
 fNamePrefix = args.prefix
-max_nfev = args.nfevMax
 sigma1 = args.sigma1
-sigma2 = args.sigma2
+sigma3 = args.sigma3
 method = args.method
-jac = args.jacobian
+supplyJac = args.jacobian
 inFileName = args.fName
 
-
-realValued = not sigma2
-
+sigma2 = sigma1 and sigma3
 epsArr = np.array([0., args.eps1])
 if args.eps3 != 0.:
     epsArr = np.append(epsArr, [args.eps2, args.eps3]).flatten()
 elif args.eps2 != 0.:
     epsArr = np.append(epsArr, args.eps2).flatten()
    
-# printing to log file
-bufferSize = 1		# Unbuffered printing to file
-outFile = open(workingDir+logName,'a',bufferSize)
-orig_stdout = sys.stdout
-sys.stdout = outFile
-sys.stderr = outFile
 print();print();print();print()
 print("\n\n\nStarting time:",datetime.datetime.now())
 sys.stdout.flush()
@@ -102,59 +107,49 @@ assert x.nz//2 == M, "M in x is %d, while the argument to script is %d"%(x.nz//2
 assert x.N == N, "N in x is %d, while the argument to script is %d"%(x.N,N)
 
 
-vf = x.slice(nd=[0,1,2]); pf = x.getScalar(nd=3)
-if 'counter' not in vf.flowDict:
-    vf.flowDict['counter'] = 0
-pf.flowDict['counter'] = vf.flowDict['counter']
-if vf.flowDict['counter']== 0:
+if 'counter' not in x.flowDict:
+    x.flowDict['counter'] = 0
+if x.flowDict['counter']== 0:
     # Saving first flow field in folder tmp/
     x.saveh5(fNamePrefix=fNamePrefix+'_0_',prefix=loadPath+'tmp/')
 
 start = time.time()
 print("Running with N=%d, L=%d, M=%d" %(N,L,M))
 print("epsArr is ",epsArr, " and Re is",x.flowDict['Re'])
+print("Method: %s, WithJac:%s, iterMax:%d, sigma1:%s, sigma2:%s"%(method,supplyJac,iterMax, sigma1,sigma2))
 sys.stdout.flush()
 tRun = 0.
 start0 = time.time()
-x = vf.appendField(pf)
 
-for iter in range(iterMax):
-    start1 = time.time()
-    x.imposeSymms(sigma1=sigma1, sigma2=sigma2)
-    vf = x.slice(nd=[0,1,2]); pf = x.getScalar(nd=3)
-    vf, pf, fnorm, flg = iterate(vf=vf, pf=pf, iterMax=1, sigma1=sigma1, sigma2=sigma2,realValued=realValued,tol=tol,max_nfev=nfevMax,method=method,passJac=jac)
-    if flg == -2:
-        print("Residual norm is smaller than the requested tolerance")
-        tempFile = open(workingDir+"DELETE_RUNCASE_FILE.txt",'a')
-        tempFile.write("\nFlag raised to delete case file at time:",datetime.datetime.now())
-        tempFile.close()
+x.imposeSymms(sigma1=sigma1, sigma3=sigma3)
+x.setWallVel()
+ffProb = rib.exactRiblet(x=x, sigma1=sigma1, sigma3=sigma3, method=method, iterMax=iterMax,
+        tol=tol, log=logName, prefix=fNamePrefix, supplyJac=supplyJac, saveDir=loadPath+'tmp/')
 
-    tRun = time.time() - start1; start1 = time.time()
-    vf.flowDict['counter'] += 1; pf.flowDict['counter'] += 1
-    x = vf.appendField(pf)
-    x.saveh5(fNamePrefix=fNamePrefix,prefix=loadPath)
-    
-    # Saving intermediate flow fields in folder tmp/
-    x.saveh5(fNamePrefix=fNamePrefix+'_%d_'%(x.flowDict['counter']),prefix=loadPath+'tmp/')
+start1 = time.time()
+x, fnorm, flg = ffProb.iterate()
+if flg == -2:
+    print("Residual norm is smaller than the requested tolerance")
+    tempFile = open(workingDir+"DELETE_RUNCASE_FILE.txt",'a')
+    tempFile.write("\nFlag raised to delete case file at time:",datetime.datetime.now())
+    tempFile.close()
 
-    print("Time for iteration no. %d (minutes): %d"%(iter,round(tRun/60.,2)))
-    print("************************************************")
+tRun = time.time() - start1; start1 = time.time()
+x.saveh5(fNamePrefix=fNamePrefix,prefix=loadPath)
+
+if fnorm <= tol:
+    print("Total run time until convergence (minutes):", round((time.time()-start0)/60.,2))
     sys.stdout.flush()
-    if fnorm <= tol:
-        print("Total run time until convergence (minutes):", round((time.time()-start0)/60.,2))
-        sys.stdout.flush()
-        break
 else:
     print("Iterations have not converged")
-    sys.stdout.flush()
 
+sys.stdout.flush()
+
+
+print("Maximum memory usage (MB):%d"%(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss/1024))
 print("+++++++++++++++++++++++++++++++++++++")
 print("+++++++++++++++++++++++++++++++++++++")
 print("\n \n \n \n \n")
 sys.stdout.flush()
+
 	
-
-
-    
-sys.stdout=orig_stdout
-outFile.close()

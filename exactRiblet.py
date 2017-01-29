@@ -79,25 +79,29 @@ class exactRiblet(object):
         bufferSize = 1		# Unbuffered printing to file
         if (self.attributes['log'] is None) or (self.attributes['log'] == 'terminal'):
             return sys.stdout
+        workingDir = os.getcwd()
+        logName = self.attributes['log']
         outFile = open(workingDir+logName,'a',bufferSize)
         orig_stdout = sys.stdout
         sys.stdout = outFile
         sys.stderr = outFile
         return orig_stdout
 
-    def _symarr2ff(self,xArr): 
+    def _symarr2ff(self,xArr,weighted=True): 
         # Convert 1-d weighted, real, reduced array (reduced if sigma1 or sigma3) to flowFieldRiblet
         N = self.x.N; M = self.x.nz//2; L = self.x.nx//2
         NN = np.int(np.ceil(N/2.)); Nn = np.int(np.floor(N/2.))
         sigma1 = self.attributes['sigma1']; sigma3 = self.attributes['sigma3']
-        coeffArr = -M + np.arange(M+1).reshape((1,M+1, 1,1,1))
-        coeffArr = np.tile(coeffArr, (1,1,4,2,1))
-        coeffArr[:,:,:,0] += 1  # For u,v,w, real part multiplies (-1)^(m+1), imaginary multiplies (-1)^m
-        coeffArr[:,:,3] += 1    # For p, there's an extra -1 factor compared to u,v,w
-
+        
         if sigma3:
-            xArr = xArr.reshape((L+1, M+1,4,2,NN))
-            xArr = np.concatenate((xArr, np.zeros((L+1,M+1,4,2,Nn),dtype=np.float)),axis=-1)
+            if sigma1: nz1 = M+1
+            else: nz1 = 2*M+1
+            coeffArr = -M + np.arange(nz1).reshape((1,nz1, 1,1,1))
+            coeffArr = np.tile(coeffArr, (1,1,4,2,1))
+            coeffArr[:,:,:,0] += 1  # For u,v,w, real part multiplies (-1)^(m+1), imaginary multiplies (-1)^m
+            coeffArr[:,:,3] += 1    # For p, there's an extra -1 factor compared to u,v,w
+            xArr = xArr.reshape((L+1, nz1,4,2,NN))
+            xArr = np.concatenate((xArr, np.zeros((L+1,nz1,4,2,Nn),dtype=np.float)),axis=-1)
             xArr[:,:,:,:,:NN-1:-1] = ((-1.)**coeffArr)*xArr[:,:,:,:,:Nn]
 
         if sigma1:
@@ -114,11 +118,11 @@ class exactRiblet(object):
         else:
             xArrNew = xArr
             
-        return realField2ff(arr=xArrNew,axis='x', flowDict=self.x.flowDict,weights=self.x.w,cls='riblet')
+        return realField2ff(arr=xArrNew,axis='x', flowDict=self.x.flowDict,weighted=weighted,weights=self.x.w,cls='riblet')
 
-    def _ff2symarr(self,ff):
+    def _ff2symarr(self,ff,weighted=True):
         # Return weighted, real, reduced (if sigma1 or sigma3) 1d-array from flowfield
-        ffArr = ff.realField(axis='x')
+        ffArr = ff.realField(axis='x',weighted=weighted)
         L = self.x.nx//2; M = self.x.nz//2; N = self.x.N
         sigma1 = self.attributes['sigma1']; sigma3 = self.attributes['sigma3']
         if sigma1:
@@ -361,14 +365,15 @@ class exactRiblet(object):
         sigma1 = self.attributes['sigma1']; sigma3 = self.attributes['sigma3']
         vf = ff.slice(nd=[0,1,2]); pf = ff.getScalar(nd=3)
 
+        print('in jcbn(), symmetries are sigma1:%r, sigma3:%r'%(sigma1,sigma3))
+
         if sigma1: nz1 = vf.nz//2 + 1
         else: nz1 = vf.nz
-        nx1 = vf.nx//2 + 1
 
         a = vf.flowDict['alpha']; b = vf.flowDict['beta']
         epsArr = vf.flowDict['epsArr']
         q0 = epsArr.size-1
-        Tz = Tderivatives(self.x.flowDict)[0]
+        Tz = Tderivatives(vf.flowDict)[0]
         N = vf.N; L = vf.nx//2; M = vf.nz//2; N4 = 4*N
 
         # No reason to keep accessing flowFieldRiblet with all its extra machinery
@@ -569,9 +574,8 @@ class exactRiblet(object):
                     Gnew[:, :,:,:,:, :Nn] += ((-1.)**coeffArr) * GnewReal2[:,:,:,:,:, ::-1]
 
                 Gnew = Gnew.reshape((8*NN, (L+1)*nz1*8*NN))
-                cInd = 0
                 rInd = (l+L)*(nz1*8*NN) + (m+M)*8*NN
-                Gmat[rInd: rInd+8*NN, cInd: cInd+nx1*nz1*8*NN] += Gnew
+                Gmat[rInd: rInd+8*NN, : ] += Gnew
         return  
 
 
@@ -596,7 +600,7 @@ class exactRiblet(object):
         nx1 = L+1
 
         J = self.linr()  # Get Lmat
-        self.jcbn(Lmat=J)    # Add non-linear jacobian to Lmat
+        self.jcbn(ff,Lmat=J)    # Add non-linear jacobian to Lmat
         
         if sigma3: NN = np.int(np.ceil(N/2.))
         else: NN = N
@@ -785,7 +789,7 @@ class exactRiblet(object):
 
             def jacFun(ffArr):
                 # Return Jacobian matrix for a given state-vector
-                ff = _symarr2ff(ffArr)
+                ff = self._symarr2ff(ffArr)
                 J, F = self.makeSystem(ff)
                 return J
                     
@@ -815,7 +819,7 @@ class exactRiblet(object):
             sys.stdout = orig_stdout
             return xNew, optRes.cost, optRes.status
 
-
+        iterMax = self.attributes['iterMax']
         for n in range(iterMax):
             saveDir = self.attributes['saveDir']
             workingDir = os.getcwd()
@@ -837,7 +841,7 @@ class exactRiblet(object):
             J, F = self.makeSystem(self.x)
                     
             sys.stdout.flush()
-
+            chebWeight = True
             # Weight Jacobian and residual matrices for clencurt weighing
             if chebWeight:
                 __weightJ(J)
@@ -850,15 +854,14 @@ class exactRiblet(object):
             dxff = self._symarr2ff(dx)
             # Ensuring correction fields are real-valued and obey the required symmetries
             # imposeSymms has realValued=True by default
-            dxff.imposeSymms(sigma1=self.attributes['sigma1'], sigma2=self.attributes['sigma3'])
+            dxff.imposeSymms(sigma1=self.attributes['sigma1'], sigma3=self.attributes['sigma3'])
             dxff[0,:,:,:3,[0,-1]] = 0.   # Correction field should not change velocity BCs, for Couette or channel flow
 
-            self.x = lineSearch(resnormFun, self.x, dxff)
+            self.x = self.lineSearch(resnormFun, self.x, dxff)
            
             # I don't have to keep using imposeSymms(), but it doesn't reduce performance, so might as well
-            self.x.imposeSymms(sigma1=sigma1, sigma2=sigma2)
-
-            if saveSolns:
+            self.x.imposeSymms(sigma1=sigma1, sigma3=sigma3)
+            if (self.attributes.get('saveDir',None) is not None):
                 if 'counter' not in self.x.flowDict:
                     self.x.flowDict['counter'] = 0
                 savePath = workingDir + saveDir
@@ -1032,16 +1035,16 @@ class exactRiblet(object):
     
 
 
-def testExactRibletModule(ffProb):
+def testExactRibletModule(ffProb,nex=5):
     sigma1 = ffProb.attributes['sigma1']; sigma3 = ffProb.attributes['sigma3']; 
     x = ffProb.x 
     tol = ffProb.attributes['tol']
     print('Testing for symmetries sigma1=%r and sigma3=%r to tolerance %.3g'%(sigma1,sigma3,tol))
     print('epsArr is ', x.flowDict['epsArr'])
    
-    x1 = x.slice(L=x.nx//2+5, M=x.nz//2+5)    # Up-slicing to avoid aliasing effects
-    vf1 = x.slice(nd=[0,1,2]); pf1 = x.slice(nd=[3])
-    
+    x1 = x.slice(L=x.nx//2+nex, M=x.nz//2+nex)    # Up-slicing to avoid aliasing effects
+    vf1 = x1.slice(nd=[0,1,2]); pf1 = x1.getScalar(nd=3)
+    N = x.N
     if sigma3: NN = np.int(np.ceil(x.N/2.))
     else: NN = x.N
     w = x.w 
@@ -1055,12 +1058,15 @@ def testExactRibletModule(ffProb):
 
     # Reduced state-vector (weighted numpy array):
     xm_ = ffProb._ff2symarr(ffProb.x)
+    xm2 = ffProb._ff2symarr(ffProb.x,weighted=False)
+
     
     # Calculating linear matrix, and the product with state-vector
     Lmat = ffProb.linr()
     LmatUnweighted = Lmat.copy()
+    print('Max entry in Lmat before weighting:',np.max(Lmat.flatten()))
     __weightJ(Lmat)
-    linTerm = np.dot(Lmat, xm_)
+    linTermArr = np.dot(Lmat, xm_)
     Lmat = LmatUnweighted
 
     # Calculating linear term from class methods
@@ -1071,24 +1077,34 @@ def testExactRibletModule(ffProb):
     # Calculating non-linear matrix, and its product with the state-vector
     Lmat0 = Lmat.copy()
     #Lmat= np.zeros((xm_.size,xm_.size),dtype=np.complex)
+    #Lmat[:] = 0.
+    print('Max entry in Lmat after zeroing:',np.max(Lmat.flatten()))
     ffProb.jcbn(ffProb.x,Lmat=Lmat)
-    Lmat -= Lmat0   
+    Lmat -= Lmat0
     __weightJ(Lmat)
-    NLterm = 0.5*np.dot(Lmat, xm_)
+    NLtermArr = 0.5*np.dot(Lmat, xm_)
+    #NLtermArr = 0.5*np.dot(Lmat, xm2)
 
     # Calculating non-linear term from class methods
-    NLtermClassFine = vf1.convNL()
+    NLtermClassFine = vf1.convNL(fft=True)
     NLtermClass = NLtermClassFine.slice(L=x.nx//2, M=x.nz//2).appendField(x.getScalar().zero())
 
 
     # Reducing terms from class methods so positive Fourier modes are discarded according to sigma1,sigma2
-    linTermMat = ffProb._symarr2ff(linTerm)
-    NLtermMat  = ffProb._symarr2ff(NLterm)
-    
+    # linTermMat = ffProb._symarr2ff(linTermArr)
+    linTermMat = ffProb._symarr2ff(linTermArr)
+    NLtermMat  = ffProb._symarr2ff(NLtermArr)
+    #NLtermMat  = ffProb._symarr2ff(NLtermArr,weighted=False)
+    NLtermMat[0,:,:,:,[0,-1]] = 0.
+
+    linTermClassArr = ffProb._ff2symarr(linTermClass)
+    NLtermClassArr  = ffProb._ff2symarr(NLtermClass)
     linResNorm = (linTermMat - linTermClass).norm()
     NLresNorm  = (NLtermMat  - NLtermClass ).norm()
 
-    linTestResult = linResNorm <= tol
+
+    #linTestResult = linResNorm <= tol
+    linTestResult = linResNorm <= 1.0e-14
     NLtestResult  = NLresNorm  <= tol
     if sigma1:
         print('sigma1 invariance norm of x is', (x - x.reflectZ().shiftPhase(phiX=np.pi) ).norm())
@@ -1099,6 +1115,7 @@ def testExactRibletModule(ffProb):
         print('Residual norm for linear is:',linResNorm)
     if not  NLtestResult:
         print('Residual norm for non-linear is:',NLresNorm)
+        print('Residual norm for arrays is:', chebnorm(NLtermClassArr - NLtermArr, x.N))
 
     if linTestResult and NLtestResult:
         print("Success for both tests!")
@@ -1107,6 +1124,10 @@ def testExactRibletModule(ffProb):
     sys.stdout.flush()
     
     return linTestResult, NLtestResult
+
+
+
+
 
 
 

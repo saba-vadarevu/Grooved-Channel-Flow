@@ -683,7 +683,7 @@ def weighted2ff(flowDict=None,arr=None,weights=None,cls='wavy'):
         raise RuntimeError('cls must be either wavy or riblet or flowFieldWavy or flowFieldRiblet')
     return
 
-def realField2ff(flowDict=None,arr=None,axis='x',weights=None,cls='wavy'):
+def realField2ff(flowDict=None,arr=None,axis='x',weighted=True,weights=None,cls='wavy'):
     """ Converts 1-d np.ndarray into flowFieldWavy object
     Inputs:
         Non-optional: flowDict, arr
@@ -697,17 +697,22 @@ def realField2ff(flowDict=None,arr=None,axis='x',weights=None,cls='wavy'):
     ffArr = np.zeros((2*L+1, 2*M+1, nd, N), dtype=np.complex)
     if weights is None:
         weights = clencurt(N)
-
-    invRootWeights = (np.sqrt(1./weights)).reshape((1,1,1,N))
-    invRootWeights = np.tile(invRootWeights, (1,1,1,2))
+    invRootWeights = (np.sqrt(1./weights)).reshape((1,1,1,1,N))
+    invRootWeights = np.tile(invRootWeights, (1,1,1,2,1))
     if (axis == 'x') or (axis == 0):
-        arr = arr.reshape((L+1, 2*M+1, nd, 2*N))
-        deweightedArr =  invRootWeights * arr 
-        ffArr[:L+1] = deweightedArr[:,:,:,:N] + 1.j*deweightedArr[:,:,:,N:]
+        arr = arr.reshape((L+1, 2*M+1, nd, 2,N))
+        if weighted:
+            deweightedArr =  invRootWeights * arr 
+        else: 
+            deweightedArr = arr
+        ffArr[:L+1] = deweightedArr[:,:,:,0] + 1.j*deweightedArr[:,:,:,1]
         ffArr[:L:-1] = np.conj(ffArr[:L, ::-1])
     else:
         arr = arr.reshape((2*L+1, M+1, nd, 2*N))
-        deweightedArr =  invRootWeights * arr 
+        if weighted:
+            deweightedArr =  invRootWeights * arr 
+        else: 
+            deweightedArr = arr
         ffArr[:,:M+1] = deweightedArr[:,:,:,:N] + 1.j*deweightedArr[:,:,:,N:]
         ffArr[:,:M:-1] = np.conj(ffArr[::-1, :M])
 

@@ -1305,7 +1305,7 @@ class flowField(np.ndarray):
             return realArr.flatten()
        
         if weights is None:
-            weights = clencurt(N)
+            weights = self.w
 
         weights = np.sqrt(weights.reshape((1,1,1,N)))
         weights = np.tile(weights,(1,1,1,2))
