@@ -65,6 +65,10 @@ class exactRiblet(object):
         self.attributes['log'] = kwargs.pop('log','outFile.txt')    # log file for output
         self.attributes['prefix'] = kwargs.pop('prefix','ribEq1')   # file name prefix for saving hdf5 files
         self.attributes['supplyJac'] = kwargs.pop('supplyJac',True) # Supply jacobian to trf or dogbox
+        self.attributes['xtol'] = kwargs.pop('xtol',1.0e-13)    # terminate when ||dx|| < xtol*(xtol+||x||) 
+        self.attributes['gtol'] = kwargs.pop('gtol',1.0e-13)   # terminate when ||g|| < gtol, g is the gradient (Jacobian) 
+        self.attributes['ftol'] = kwargs.pop('ftol',1.0e-10) # terminate when ||dF|| < ftol*||F|| 
+        self.attributes['tr_solver'] = kwargs.pop('tr_solver', None)
         self.attributes['version_str'] = self.version_str
         self.attributes['saveDir'] = kwargs.pop('saveDir',None)     
         # Directory to save intermediate solutions when running 'simple'. If None, don't save solutions
@@ -78,8 +82,11 @@ class exactRiblet(object):
             """
         bufferSize = 1		# Unbuffered printing to file
         if (self.attributes['log'] is None) or (self.attributes['log'] == 'terminal'):
+            print('Not using a log file, printing to terminal')
             return sys.stdout
         workingDir = os.getcwd()
+        if not workingDir.endswith('/'):
+            workingDir = workingDir + '/'
         logName = self.attributes['log']
         outFile = open(workingDir+logName,'a',bufferSize)
         orig_stdout = sys.stdout
@@ -365,7 +372,6 @@ class exactRiblet(object):
         sigma1 = self.attributes['sigma1']; sigma3 = self.attributes['sigma3']
         vf = ff.slice(nd=[0,1,2]); pf = ff.getScalar(nd=3)
 
-        print('in jcbn(), symmetries are sigma1:%r, sigma3:%r'%(sigma1,sigma3))
 
         if sigma1: nz1 = vf.nz//2 + 1
         else: nz1 = vf.nz
@@ -614,13 +620,17 @@ class exactRiblet(object):
         BCrows0 = 8*NN*np.arange((L+1)*nz1).reshape(((L+1)*nz1,1))
         if sigma3:
             # BCs on real and imag, but only at y=1, because y=-1 isn't part of the vector
-            BCrows1 = N*np.arange(6).reshape((1,6))
+            BCrows1 = NN*np.arange(6).reshape((1,6))
         else:
             BCrows1 = N*np.arange(6).reshape((6,1)) + np.array([0,N-1]).reshape((1,2))
             BCrows1 = BCrows1.reshape((1,12))
         BCrows = BCrows0 + BCrows1
-                    
+        
+
+
         BCrows = BCrows.flatten()
+
+
 
         J[BCrows,:] = 0.
         J[BCrows,BCrows] = 1.
@@ -800,17 +810,41 @@ class exactRiblet(object):
 
             max_nfev = self.attributes['iterMax']
             method = self.attributes['method']
+            xtol = self.attributes['xtol']
+            ftol = self.attributes['ftol']
+            gtol = self.attributes['gtol']
             if method=='lm':
                 bounds = (-np.inf,np.inf)
                 max_nfev *= (self._ff2symarr(self.x).size//2)
             else:
                 bounds = (-1.,1.)
                 if method =='trf': max_nfev += 1
-                else: max_nfev = np.int(1.5*max_nfev)
+                else: max_nfev = np.int(5*max_nfev)
+            
+            # least_squares did not offer a callback function to save intermediate solutions,
+            #   I defined this manually in scipy's libraries. This must be done when running on other systems
+            # The following callback functions saves intermediate flowfields.
+            if (method in ('dogbox','trf')) and (self.attributes.get('saveDir',None) is not None):
+                global saveCounter
+                saveCounter = self.x.flowDict.get('counter',0)
+                print('saveCounter:',saveCounter)
+                savePath = self.attributes['saveDir']
+                def callbackFun(ffArr,_savePath,_fNamePrefix):
+                    ff = self._symarr2ff(ffArr)
+                    globals()["saveCounter"] += 1
+                    fNPrefix = _fNamePrefix+'_'+str(saveCounter)+'_'
+                    ff.saveh5(prefix=_savePath, fNamePrefix=fNPrefix)
+                callback = lambda ffArr: callbackFun(ffArr, savePath, self.attributes['prefix'])
+                print('Trying to save to:',savePath,', with file name prefix:', self.attributes['prefix'])
+                callback(self._ff2symarr(self.x))
+            else:
+                callback = None
+
 
             x0Arr = self._ff2symarr(self.x)
 
-            optRes = least_squares(__resFunReal, x0Arr,jac=jac,bounds=bounds,verbose=2,method=method,max_nfev=max_nfev)
+            optRes = least_squares(__resFunReal, x0Arr,jac=jac,bounds=bounds,verbose=2,
+                    method=method,max_nfev=max_nfev,xtol=xtol,ftol=ftol,gtol=gtol,callback=callback)
            
             xArr = optRes.x
             xNew = self._symarr2ff(xArr)
@@ -864,8 +898,10 @@ class exactRiblet(object):
             if (self.attributes.get('saveDir',None) is not None):
                 if 'counter' not in self.x.flowDict:
                     self.x.flowDict['counter'] = 0
-                savePath = workingDir + saveDir
-                self.x.saveh5(prefix=savePath, fNamePrefix=self.attributes['prefix']+'_'+self.x.flowDict['counter']+'_')
+                savePath = saveDir
+                fNamePrefix = self.attributes['prefix']+'_'+str(self.x.flowDict['counter'])+'_'
+                print(savePath, fNamePrefix)
+                self.x.saveh5(prefix=savePath, fNamePrefix=fNamePrefix)
 
 
             fnorm = resnormFun(self.x)
@@ -1064,7 +1100,6 @@ def testExactRibletModule(ffProb,nex=5):
     # Calculating linear matrix, and the product with state-vector
     Lmat = ffProb.linr()
     LmatUnweighted = Lmat.copy()
-    print('Max entry in Lmat before weighting:',np.max(Lmat.flatten()))
     __weightJ(Lmat)
     linTermArr = np.dot(Lmat, xm_)
     Lmat = LmatUnweighted
@@ -1076,9 +1111,6 @@ def testExactRibletModule(ffProb,nex=5):
 
     # Calculating non-linear matrix, and its product with the state-vector
     Lmat0 = Lmat.copy()
-    #Lmat= np.zeros((xm_.size,xm_.size),dtype=np.complex)
-    #Lmat[:] = 0.
-    print('Max entry in Lmat after zeroing:',np.max(Lmat.flatten()))
     ffProb.jcbn(ffProb.x,Lmat=Lmat)
     Lmat -= Lmat0
     __weightJ(Lmat)

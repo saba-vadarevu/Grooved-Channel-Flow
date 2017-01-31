@@ -30,12 +30,14 @@ parser.add_argument("--eps1",help="Semi-amplitude, Optional, default: 0.0", defa
 parser.add_argument("--eps2",help="Semi-amplitude, Optional, default: 0.0", default = 0.0,type=float)
 parser.add_argument("--eps3",help="Semi-amplitude, Optional, default: 0.0", default = 0.0,type=float)
 parser.add_argument("--tol",help="Tolerance for N-R method, Optional, default: 1.0e-13", default = 1.0e-13,type=float)
-parser.add_argument("--iterMax",help="Total number of iterations, Optional, default: 6", default = 6,type=int)
+parser.add_argument("--iterMax",help="Total number of iterations, Optional, default: 15", default = 15,type=int)
 parser.add_argument("--log",help="Name of log file, Optional, default: outFile.txt (append)", default = 'outFile.txt',type=str)
 parser.add_argument("--prefix",help="fNamePrefix for solution files, Optional, default: ribEq1", default = 'ribEq1',type=str)
 parser.add_argument("--method",help="Method to use for solving equations,\
         Options: 'simple' (Newton's+jacobian inversion+line search)\
                 'trf', 'dogbox', 'lm' from scipy's least_squares", default='simple',type=str)
+parser.add_argument("--tr_solver",help="Trust region solver to use.\
+        Options: 'exact', 'lsmr', 'None' (let scipy choose appropriate solver). Default: None", default=None,type=str)
 parser.add_argument("--fName",help="Input file name. If not supplied or invalid, use whatever .hdf5 is found",default='.hdf5',type=str)
 
 symParser1 = parser.add_mutually_exclusive_group(required=False)
@@ -137,8 +139,10 @@ if flg == -2:
 tRun = time.time() - start1; start1 = time.time()
 x.saveh5(fNamePrefix=fNamePrefix,prefix=loadPath)
 
-if fnorm <= tol:
-    print("Total run time until convergence (minutes):", round((time.time()-start0)/60.,2))
+print("Total run time (minutes):%d" %((time.time()-start0)/60.))
+
+if fnorm[-1] <= tol:
+    print("Iterations have converged")
     sys.stdout.flush()
 else:
     print("Iterations have not converged")
