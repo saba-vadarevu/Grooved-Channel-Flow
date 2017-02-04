@@ -2,6 +2,7 @@ import numpy as np
 from flowFieldWavy import *
 import scipy.integrate as spint
 import scipy as sp
+from scipy.sparse import bmat, csc_matrix, diags, coo_matrix
 import sys
 import os
 try:
@@ -64,7 +65,8 @@ class exactRiblet(object):
         self.attributes['tol'] = kwargs.pop('tol',1.0e-13)      
         self.attributes['log'] = kwargs.pop('log','outFile.txt')    # log file for output
         self.attributes['prefix'] = kwargs.pop('prefix','ribEq1')   # file name prefix for saving hdf5 files
-        self.attributes['supplyJac'] = kwargs.pop('supplyJac',True) # Supply jacobian to trf or dogbox
+        self.attributes['supplyJac'] = kwargs.pop('supplyJac',False) # Supply jacobian to trf or dogbox
+        self.attributes['jacSparsity'] = kwargs.pop('jacSparsity',False) # Supply jacobian to trf or dogbox
         self.attributes['xtol'] = kwargs.pop('xtol',1.0e-13)    # terminate when ||dx|| < xtol*(xtol+||x||) 
         self.attributes['gtol'] = kwargs.pop('gtol',1.0e-13)   # terminate when ||g|| < gtol, g is the gradient (Jacobian) 
         self.attributes['ftol'] = kwargs.pop('ftol',1.0e-10) # terminate when ||dF|| < ftol*||F|| 
@@ -584,6 +586,160 @@ class exactRiblet(object):
                 Gmat[rInd: rInd+8*NN, : ] += Gnew
         return  
 
+    def _jacSparsity(self):
+        """ Returns the sparsity structure of the Jacobian matrix, as type np.int8"""
+        L = self.x.nx//2; M = self.x.nz//2; N = self.x.N
+        sigma1 = self.attributes['sigma1']; sigma3 = self.attributes['sigma3']
+        if sigma1: M1 = 1
+        else: M1 = M+1
+        if sigma3: NN = np.int(np.ceil(N/2.))
+        else: NN = N
+
+        epsArr = self.x.flowDict['epsArr']
+        if np.linalg.norm(epsArr)> 0.: q = np.where(epsArr>0.)[-1]
+        else: q = 0
+
+        
+        oneMat = np.ones((NN,NN),dtype=np.uint8)
+        oneArr = np.ones(NN,dtype=np.uint8)
+        oneMat0 = oneMat.copy(); oneArr0 = oneArr.copy()
+
+        # I impose BCs at nodes y=+-1, so the sparsity structure must reflect this
+        if not sigma3:
+            oneMat0[[0,-1],:] = 0
+            oneArr0[[0,-1]] = 0
+        else:
+            oneMat0[0,:] = 0
+            oneArr0[0] = 0
+
+        Den = csc_matrix(oneMat0,dtype=np.int8)
+        Spa = diags(oneArr0,dtype=np.int8)
+        Den_BC = csc_matrix(oneMat,dtype=np.int8)   # For div.u, the rows at y=+-1 aren't set to zero
+        Spa_BC = diags(oneArr,dtype=np.int8)
+        Z = diags(np.zeros(NN),dtype=np.int8)
+        Z2 = diags(np.zeros(2*NN), dtype=np.int8)
+
+        Den0 = bmat([[Den, None],
+                      [None, Den]])
+        Den1 = bmat([[None, Den],
+                    [Den, None]])
+        Den2 = bmat([[Den, Den],
+                    [Den, Den]])
+        Spa0 = bmat([[Spa, None],
+                     [None, Spa]])
+        Spa1 = bmat([[None, Spa],
+                     [Spa, None]])
+        Spa2 = bmat([[Spa, Spa],
+                     [Spa, Spa]])
+       
+        # To be used in J0, J1 for divergence equation
+        Spa1_BC = bmat([[None, Spa_BC],
+                        [Spa_BC, None]])
+        Den0_BC = bmat([[Den_BC, None],
+                        [None, Den_BC]])
+        Den1_BC = bmat([[None, Den_BC],
+                        [Den_BC, None]])
+
+        J4 = bmat([[Den2, None, Spa2, Z2  ],
+                   [None, Den2, Spa2, None],
+                   [None, None, Den2, None],
+                   [Z2, None, None, None]])
+        J3 = bmat([[Den2, Spa2, Spa2, Z2  ],
+                   [Spa2, Den2, Spa2, None],
+                   [Spa2, Spa2, Den2, None],
+                   [Z2  , None, None, None]])
+        J2 = J3
+        J1 = bmat([[Den2, Spa2, Spa2, None],
+                   [Spa2, Den2, Spa2, None],
+                   [Spa2, Spa2, Den2, Den1],
+                   [None, None, Den1_BC, None]])
+        J0 = bmat([[Den2, Spa2, Spa2, Spa1],
+                   [Spa2, Den2, Spa2, Spa0],
+                   [Spa2, Spa2, Den2, Den1],
+                   [Spa1_BC, Den0_BC, Den1_BC, None]])
+
+        def _returnJac(l,m,lp,mp):
+            ld = np.abs(l-lp)
+            md = np.abs(m-mp)
+            if not ((ld <= L) and (md <= M+q)):
+                return None
+            elif not (md <= M):
+                return J4
+            elif not ((ld == 0) and (md < 2*q)):
+                return J3
+            elif not (md < q):
+                return J2
+            elif not (md == 0):
+                return J1
+            else:
+                return J0
+        def _cIndm(mpp):
+            if (sigma1) and (mpp > 0):
+                # Add to columns corresponding to (lp,-|mp|)
+                return (-mpp+M)*8*NN
+            else:
+                return (mpp+M)*8*NN
+                
+        rows = np.array([]); cols = np.array([]); data=np.array([])
+        for l in range(-L,1):
+            for m in range(-M,M1):
+                for lp in range(-L,L+1):
+                    for mp in range(-M,M+1):
+                        Jmat = _returnJac(l,m,lp,mp)
+                        rInd = (l+L)*(M+M1)*8*NN + (m+M)*8*NN
+                        # Because of the folding of the Jacobian to impose symmetries/realValuedness
+                        #   (see self.linr() and self.jcbn())
+                        # I need to make a few changes to cInd before assigning to the Jacobian sparsity structure
+                        if lp > 0:
+                            # Add to columns corresponding to (-lp,-mp)
+                            cInd = (-lp+L)*(M+M1)*8*NN + _cIndm(-mp)
+                        else:
+                            cInd = (lp+L)*(M+M1)*8*NN + _cIndm(mp) 
+
+                        if Jmat is not None:
+                            #print(l,m,lp,mp)
+                            rows = np.concatenate((rows, rInd+Jmat.row))
+                            cols = np.concatenate((cols, cInd+Jmat.col))
+                            data = np.concatenate((data, Jmat.data))
+
+        rows = rows.astype(np.uint32)
+        cols = cols.astype(np.uint32)
+        data = data.astype(np.int8)
+        
+        # Finally, imposing BCs  
+        BCrows0 = 8*NN*np.arange((L+1)*(M+M1)).reshape(((L+1)*(M+M1),1))
+        if sigma3:
+            # BCs on real and imag, but only at y=1, because y=-1 isn't part of the vector
+            BCrows1 = NN*np.arange(6).reshape((1,6))
+        else:
+            BCrows1 = N*np.arange(6).reshape((6,1)) + np.array([0,N-1]).reshape((1,2))
+            BCrows1 = BCrows1.reshape((1,12))
+        BCrows = BCrows0 + BCrows1
+        BCrows = BCrows.flatten().astype(np.uint32)
+
+        rows = np.concatenate((rows, BCrows)).astype(np.uint32)
+        cols = np.concatenate((cols, BCrows)).astype(np.uint32)
+        data = np.concatenate((data, np.ones(BCrows.size,dtype=np.int8))).astype(np.int8)
+
+        Jsparsity = coo_matrix((data, (rows, cols)),dtype=np.int8)
+        #Jsparsity = bmat([[Jsparsity,None],
+        #                  [None, diags(np.zeros((2*NN)),dtype=np.int8)]] )
+
+        Jsparsity.data[Jsparsity.data>1] = 1
+        
+        ind0 = (L+1)*(M+M1)*8*NN - Jsparsity.shape[0]
+        ind1 = (L+1)*(M+M1)*8*NN - Jsparsity.shape[1]
+        if not ((ind0==0) and (ind1==0)):
+            print("Something's off. Jsparsity is missing %d rows and %d columns."%(ind0,ind1))
+            zeroMat = np.zeros((ind0,ind1),dtype=np.int8)
+            Jsparsity = bmat([[Jsparsity,None],
+                              [None,  zeroMat]],dtype=np.int8)
+            print("Fixed this by adding a dense zero matrix for now.")
+        
+                    
+        return Jsparsity
+
+
 
     def _residual(self):
         return (self.x.slice(nd=[0,1,2]).residuals(pField=x.getScalar(nd=3)).appendField( self.x.slice(nd=[0,1,2]).div() ) )
@@ -646,6 +802,7 @@ class exactRiblet(object):
         print("Beginning line search.... Initial residual norm is ",normFun(x0))
         if arr is None:
             arr = np.arange(-0.5,2.1,0.1)
+            arr = np.concatenate((arr, np.arange(2.5,10.1,0.5), np.arange(15.,101.,5.)))
         else:
             arr = np.array(arr).flatten()
 
@@ -673,10 +830,10 @@ class exactRiblet(object):
         else:
             round2 = False
 
-        print("Line search.... normArr is",normArr)
+        # print("Line search.... normArr is",normArr)
         print("Minimal norm is obtained for q in q*dx of %.2g, producing norm of %.3g"%(qMin, normMin))
         if round2:
-            print("Finer line search.... normArr is",normArrNew)
+            # print("Finer line search.... normArr is",normArrNew)
             print("Minimal norm is obtained for q in q*dx of %.2g, producing norm of %.3g"%(qMinNew, normMinNew))
             qMin = qMinNew
 
@@ -701,6 +858,7 @@ class exactRiblet(object):
         rcond = self.attributes.get('rcond',1.0e-06)
         method = self.attributes['method']
         sigma1 = self.attributes['sigma1']; sigma3 = self.attributes['sigma3']
+        
 
         if method in ("trf","dogbox","lm"):
             trustRegion= True
@@ -820,7 +978,11 @@ class exactRiblet(object):
                 bounds = (-1.,1.)
                 if method =='trf': max_nfev += 1
                 else: max_nfev = np.int(5*max_nfev)
-            
+       
+            if self.attributes['jacSparsity']:
+                jacSparsityMat = self._jacSparsity()
+            else:
+                jacSparsityMat = None
             # least_squares did not offer a callback function to save intermediate solutions,
             #   I defined this manually in scipy's libraries. This must be done when running on other systems
             # The following callback functions saves intermediate flowfields.
@@ -843,7 +1005,7 @@ class exactRiblet(object):
 
             x0Arr = self._ff2symarr(self.x)
 
-            optRes = least_squares(__resFunReal, x0Arr,jac=jac,bounds=bounds,verbose=2,
+            optRes = least_squares(__resFunReal, x0Arr,jac=jac,bounds=bounds,verbose=2,jac_sparsity=jacSparsityMat,
                     method=method,max_nfev=max_nfev,xtol=xtol,ftol=ftol,gtol=gtol,callback=callback)
            
             xArr = optRes.x
@@ -882,7 +1044,6 @@ class exactRiblet(object):
                 __weightF(F)
             
             dx, linNorm, jRank,sVals = np.linalg.lstsq(J,-F,rcond=rcond)
-            linNorm = chebnorm(np.dot(J,dx) + F, x.N)
             print('Jacobian inversion returned with residual norm:',linNorm)
        
             dxff = self._symarr2ff(dx)

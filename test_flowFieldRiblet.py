@@ -16,7 +16,8 @@ ind7 = np.index_exp[0,10,3,2,:]     # k= 0, l= 3, m= 0, y=yCheb
 # eps_1 = 0.05, eps_2 = 0.025, eps_3 = 0.03
 # A_1 = 10%, A_2 = 5%, A_3 = 6%
 testDict = getDefaultDict()
-testDict.update({'L':3,'M':7,'N':21,'K':0,'eps':5.0e-2,'epsArr':np.array([0.,0.05,0.025,0.03]),'alpha':10., 'beta':2.5,'omega':0.,'isPois':0})
+testDict.update({'L':3,'M':7,'N':21,'K':0,'eps':5.0e-2,'epsArr':np.array([0.,0.05,0.025,0.03]),'phiArr':np.array([0., 0.,0.,0.]),\
+        'alpha':10., 'beta':2.5,'omega':0.,'isPois':0})
 K = testDict['K']; L = testDict['L']; M = testDict['M']; N = testDict['N']
 epsArr = testDict['epsArr']
 
@@ -64,7 +65,8 @@ class WavyTestCase(unittest.TestCase):
                 only for the flowFieldRiblet defined above the class definition. Do not modify it.
     To ensure that I don't modify it by mistake, I'm including a copy of it here:
 
-    testDict.update({'L':3,'M':7,'N':21,'K':0,'eps':5.0e-2,'epsArr':np.array([0.05,0.025,0.03]),'alpha':25., 'beta':10.,'omega':0.,'isPois':0})
+    testDict.update({'L':3,'M':7,'N':21,'K':0,'eps':5.0e-2,'epsArr':np.array([0.,0.05,0.025,0.03]),'phiArr':np.array([0., 0.,0.,0.0]),\
+        'alpha':10., 'beta':2.5,'omega':0.,'isPois':0})
     vf[0,L,M,0] = vf.y 
     vf[0,L+1,M+1,1] =  (1.-vf.y**4)*epsArr[0] + (1.-vf.y**8)*epsArr[1]  + 1.j* ( epsArr[2]* (1.-vf.y**2)**3 )
     vf[0,L-1,M-1,1] =  (1.-vf.y**4)*epsArr[0] + (1.-vf.y**8)*epsArr[1]  - 1.j* ( epsArr[2]* (1.-vf.y**2)**3 )
@@ -104,17 +106,24 @@ class WavyTestCase(unittest.TestCase):
         return
 
     def test_Tderivatives(self):
-        Tz, Tzz, Tz2 = Tderivatives(vf.flowDict)
-        TzPreCal = 1.j* np.array([0.225, 0.125, 0.125, 0., -0.125, -0.125, -0.225])
-        TzzPreCal = np.array([1.6875, 0.625, 0.3125, 0., 0.3125, 0.625, 1.6875])
-        Tz2PreCal = np.array([-0.050625, -0.05625, -0.071875, -0.03125, 0.040625, 0.0875, 0.16375,\
-                0.0875, 0.040625, -0.03125, -0.071875, -0.05625, -0.050625])
-
+        """ 'beta':2.5,  'epsArr':np.array([0.,0.05,0.025,0.03]),'phiArr':np.array([0., 0.,1.,0.5]) """
+        # T_z,q  = -i. b. q. eps_q. exp(-i. phi_q. pi)
+        # T_zz,q = b^2. q^2. eps_q. exp(-i. phi_q. pi)
+        assert 'phiArr' in vf.flowDict
+        # For just this test, I'm having non zero phi in flowDict 
+        #   (I wrote all other tests earlier without this, and it's a pain to rewrite them)
+        tempDict = vf.flowDict.copy()
+        tempDict['phiArr'] = np.array([0., 0., 1., 0.5])
+        Tz, Tzz, Tz2 = Tderivatives(tempDict)
+        TzPreCal = np.array([-0.225, -0.125j, 0.125j, 0., -0.125j, 0.125j, -0.225])
+        TzzPreCal = np.array([1.6875j, -0.625, 0.3125, 0., 0.3125, -0.625, -1.6875j])
+        Tz2PreCal = 1.0e-02* np.array([5.0625, 5.625j, -1.5625 -5.625j, 3.125, -1.5625+5.625j, -3.125 - 5.625j,\
+                16.375,\
+                -3.125 + 5.625j, -1.5625 - 5.625j, 3.125, -1.5625 + 5.625j, -5.625j, 5.0625],dtype=np.complex)
 
         resnormTz  = np.linalg.norm(Tz-TzPreCal)
         resnormTzz = np.linalg.norm(Tzz - TzzPreCal)
         resnormTz2 = np.linalg.norm(Tz2 - Tz2PreCal)
-
         self.assertLess( resnormTz , tol32)
         self.assertLess( resnormTzz, tol32)
         self.assertLess( resnormTz2, tol32)

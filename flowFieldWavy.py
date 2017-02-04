@@ -287,9 +287,9 @@ class flowFieldWavy(flowField):
     Adds an extra attribute "eps" as a key in flowDict
     
     Overloads methods for differentiation: ddx, ddx2,ddy,..., along with .printCSV()'''
-    def __new__(cls,arr=None,flowDict=None):
+    def __new__(cls,arr=None,flowDict=None,**kwargs):
         #obj = flowField.__new__(flowFieldWavy,arr=arr,flowDict=flowDict,dictFile=dictFile)
-        obj = flowField.__new__(cls,arr=arr,flowDict=flowDict)
+        obj = flowField.__new__(cls,arr=arr,flowDict=flowDict,**kwargs)
         if 'eps' not in obj.flowDict:
             warn('flowFieldWavy object does not have key "eps" in its dictionary. Setting "eps" to zero')
             obj.flowDict['eps'] = 0.
@@ -740,13 +740,20 @@ class flowFieldRiblet(flowFieldWavy):
     The amplitudes of the Fourier modes are supplied as a numpy array 'epsArr' that is part of 
         flowDict
     If epsArr is not present in flowDict, it is created from flowDict['eps']"""
-    def __new__(cls,arr=None,flowDict=None):
-        obj = flowFieldWavy.__new__(cls,arr=arr,flowDict=flowDict)
+    def __new__(cls,arr=None,flowDict=None,**kwargs):
+        obj = flowFieldWavy.__new__(cls,arr=arr,flowDict=flowDict,**kwargs)
         if 'eps' not in obj.flowDict:
             warn('flowFieldWavy object does not have key "eps" in its dictionary. Setting "eps" to zero')
             obj.flowDict['eps'] = 0.
         else:
             assert type(obj.flowDict['eps']) is np.float64 or (type(obj.flowDict['eps']) is np.float), 'eps in flowDict must be of type float'
+        if 'epsArr' not in obj.flowDict:
+            warn('flowFieldWavy object does not have key epsArr in its dictionary. Setting zero array')
+            obj.flowDict['epsArr'] = np.array([0.],dtype=np.float)
+        if 'phiArr' not in obj.flowDict:
+            warn('flowFieldWavy object does not have key phiArr in its dictionary. Setting zero array')
+            obj.flowDict['phiArr'] = np.zeros(obj.flowDict['epsArr'].size, dtype=np.float) 
+            
         obj.verify()
         Tz, Tzz, Tz2 = Tderivatives(obj.flowDict)
         obj.Tz = Tz
@@ -946,57 +953,57 @@ class flowFieldRiblet(flowFieldWavy):
 
 
 
-def Tderivatives(flowDict,complexType=np.complex128):
+def Tderivatives(flowDict):
     # First entry of epsArr is the amplitude of zeroth groove-mode, and is set to zero
     
     if 'epsArr' in flowDict:    
         epsArr = np.float64(flowDict['epsArr'] )
         if epsArr[0] != 0.:
             print("epsArr is", epsArr)
-            warn('eps_0 is not zero. The code becomes inconsistent when it is not. Have a look.')
+            warn('eps_0 is not zero.')
     else:
+        print("epsArr is not in flowDict. Using zeros.")
         epsArr = np.array([0.,flowDict['eps']], dtype=np.float64)
+    if 'phiArr' in flowDict:    
+        phiArr = np.float64(flowDict['phiArr'] )
+        if phiArr[0] != 0.:
+            print("phiArr is", phiArr)
+            warn('phi_0 is not zero.')
+    else:
+        print("phiArr is not in flowDict. Using zeros.")
+        phiArr = np.zeros(epsArr.size, dtype=np.float64)
+
     b = flowDict['beta']; b2 = b**2
     q0 = epsArr.size-1
     # Populating arrays T_z(q), T_zz(q), and T^2_z(q)
     complexType=np.complex128
-    Tz = np.zeros(2*q0+1, dtype=complexType)
     qArr = np.arange(-q0, q0+1)
-    eArr = np.zeros(2*q0+1,dtype=complexType)
-    eArr[:q0+1] = epsArr[::-1]
-    eArr[-q0:] = epsArr[1:]
-    # eArr represents epsArr, but extending form -ve to 0 to +ve instead of just +ve
-    if complexType is np.complex64:
-        qArr = np.float32(qArr); eArr = np.float32(eArr)
-    Tzz = Tz.copy()
-
-    Tz[:] = -1.j*b*qArr*eArr
-    Tzz[:] = b2 * qArr**2 * eArr
+    eArr = np.zeros(2*q0+1,dtype=np.float)
+    # eArr represents epsArr, but extended from -ve to 0 to +ve instead of just +ve
+    eArr[q0:] = epsArr          # eps for q>= 0 
+    eArr[:q0] = epsArr[:0:-1]   # eps for q < 0
     
-    tmpArr = np.zeros(4,dtype=np.float32)
-    tmpArr[:q0+1] = epsArr
-    # Following code uses name tmpArr instead of epsArr, because earlier, epsArr[0]
-    #   referred to eps_1, which was a stupid thing to have
-    assert epsArr.size <= 4, "The expression below for Tz2 is only valid for upto eps_3"
-    # tmpArr2 represents Tz2 when three modes are presents. tmpArr2[0] is for e^0ibZ, 
-    #       and tmpArr2[6] is for e^6ibZ. Entries for positive and negative modes remain the same
-    tmpArr2 = np.zeros(7,dtype=np.float32)
-    tmpArr2[0] = 2.*(-9.*tmpArr[3]**2  - 4.*tmpArr[2]**2  - tmpArr[1]**2 )
-    tmpArr2[1] = -12.*tmpArr[2]*tmpArr[3]  - 4.*tmpArr[1]*tmpArr[2]
-    tmpArr2[2] = -6.*tmpArr[1]*tmpArr[3] + tmpArr[1]**2
-    tmpArr2[3] = 4.*tmpArr[1]*tmpArr[2]
-    tmpArr2[4] = 6.*tmpArr[1]*tmpArr[3] + 4.*tmpArr[2]**2
-    tmpArr2[5] = 12.*tmpArr[2]*tmpArr[3]
-    tmpArr2[6] = 9.*tmpArr[3]**2
-    
-    Tz2 = np.zeros(13, dtype=complexType)
-    tmpArr2 = -b2 * tmpArr2
-    Tz2[:7] = tmpArr2[::-1]
-    Tz2[-6:] = tmpArr2[1:]
+    pArr = np.zeros(2*q0+1,dtype=np.float)
+    # pArr represents extended phiArr
+    pArr[q0:] = phiArr          # phi for q>= 0 
+    pArr[:q0] = -phiArr[:0:-1]  # phi for q < 0
 
-    Tz2 = Tz2[(6-2*q0):(6+2*q0+1)]
+    Tz  = -1.j*b* qArr * eArr * np.exp(-1.j* pArr * np.pi)
+    Tzz = b2 * qArr**2 * eArr * np.exp(-1.j* pArr * np.pi)
 
-    del tmpArr,tmpArr2
+    # Calculating Tz2 using ifft and fft    
+    Lz = 2.*np.pi/b
+    zArr = np.arange(0., Lz, Lz/(4*q0+1)).reshape((4*q0+1,1))
+    q2Arr = np.arange(-2*q0, 2*q0+1)
+
+    TzPhys = np.sum( Tz.reshape((1,Tz.size)) * \
+                    np.exp( 1.j*b* zArr * qArr.reshape((1,qArr.size))), axis=1)
+    Tz2Phys = (TzPhys**2).reshape((TzPhys.size,1))
+    q2Arr = q2Arr.reshape((1,q2Arr.size))
+    zArr = zArr.reshape((zArr.size,1))
+    Tz2  = np.sum( Tz2Phys * \
+                     np.exp( -1.j* q2Arr * b * zArr), axis=0)/Tz2Phys.size
+
     return Tz, Tzz, Tz2
 
 

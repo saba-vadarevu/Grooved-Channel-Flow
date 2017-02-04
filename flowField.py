@@ -1,5 +1,4 @@
-"""
-flowField.py
+""" flowField.py
 Defines a class (inheriting numpy.ndarray) for plane channel and Couette flows
     Discretization is Fourier, Fourier, Chebyshev (collocation), Fourier in t,x,y,z
 Class instances have shape (nt, nx, nz, nd, N) for t,x,z, components, y
@@ -96,7 +95,6 @@ class flowField(np.ndarray):
     Methods: 
         verify 
         slice, getScalar, appendField, copyArray
-        real, imag, conjugate, abs
         ddt, ddx, ddx2, ddz, ddz2, ddy, ddy2 
         (untested:) intX, intY, intZ
         grad, div, laplacian, curl, convNL, residuals, solvePressure (incomplete)
@@ -127,7 +125,7 @@ class flowField(np.ndarray):
     A warning message is printed when the default dictionary is used.
             
     """
-    def __new__(cls, arr=None, flowDict=None):
+    def __new__(cls, arr=None, flowDict=None,**kwargs):
         """Creates a new instance of flowField class with arguments (cls, arr=None,flowDict=None,dictFile=None)
         cls argument can be used to initialize subclasses of flowField: flowFieldWavy or flowFieldRiblet
         """
@@ -162,11 +160,17 @@ class flowField(np.ndarray):
         obj.nt = nt
         obj.N = N
         obj.nd = flowDict['nd']
-        yCheb,DM = chebdif(N,2)
-        w = clencurt(N)
-        obj.y = yCheb
-        obj.D = DM[:,:,0].reshape((N,N)); obj.D2 = DM[:,:,1].reshape((N,N))
-        obj.w = w
+        if not all(_keys in kwargs for _keys in ("y","D","D2")):
+            y,DM = chebdif(N,2)
+            D = DM[:,:,0].reshape((N,N)); D2 = DM[:,:,1].reshape((N,N))
+            obj.y = y; obj.D = D; obj.D2 = D2
+        else:
+            obj.y = kwargs['y']
+            obj.D = kwargs['D']; obj.D2 = kwargs['D2']
+        if not ('w' in kwargs):
+            obj.w = clencurt(N)
+        else: 
+            obj.w = kwargs['w']
         
         return obj
         
@@ -258,17 +262,25 @@ class flowField(np.ndarray):
             N = abs(int(N))
             Nt = flowDict_temp['N']
             if N != Nt:
-                y = chebdif(N,1)[0]
+                y,DM = chebdif(N,2)
                 obj_t = obj.reshape((obj.size//Nt,Nt))
                 obj = np.zeros((obj_t.size//Nt,N),dtype=np.complex)
                 for n in range(obj_t.size//Nt):
                     obj[n] = chebint(obj_t[n],y)
+                # Don't need the following for slicing, but will use them later
+                D = DM[:,:,0].reshape((N,N)); D2 = DM[:,:,1].reshape((N,N))
+                w = clencurt(N)
+            else:
+                y = self.y; D = self.D; D2 = self.D2; w = self.w
             obj = obj.reshape(obj.size)
             flowDict_temp['N'] = N
+        else:
+            y = self.y; D = self.D; D2 = self.D2; w = self.w
+
 
         obj = np.ascontiguousarray(obj)  # Making sure that the array is a continuous block of memory
         
-        obj = flowField.__new__(self.__class__,arr=obj, flowDict = flowDict_temp).view4d()
+        obj = flowField.__new__(self.__class__,arr=obj, flowDict = flowDict_temp,y=y,D=D,D2=D2,w=w)
         
         if (nd is not None):
             nd = np.asarray([nd])
@@ -306,28 +318,12 @@ class flowField(np.ndarray):
             v2 = obj.copyArray()
             v1=np.append(v1,v2,axis=3)
             tempDict['nd'] += obj.flowDict['nd']
-        return flowField.__new__(self.__class__,arr=v1, flowDict=tempDict).view4d()
+        return flowField.__new__(self.__class__,arr=v1, flowDict=tempDict,y=self.y,D=self.D,D2=self.D2,w=self.w).view4d()
     
     def copyArray(self):
         """ Returns a copy of the np.ndarray of the instance. 
         This is useful for manipulating the entries of a flowField without bothering with all the checks"""
         return self.view(np.ndarray).copy()
-    
-    def real(self):
-        """ Returns the real part of the flowField (the entries are still complex, with zero imaginary parts)"""
-        return flowField.__new__(self.__class__,arr=self.copyArray().real,flowDict=self.flowDict)
-    
-    def imag(self):
-        """ Returns the imaginary part of the flowField (the entries are still complex, with zero imaginary parts)"""
-        return flowField.__new__(self.__class__,arr=self.copyArray().imag,flowDict=self.flowDict)
-    
-    def conjugate(self):
-        """ Returns complex conjugate of flowFIeld instance"""
-        return self.real()-1.j*self.imag()
-
-    def abs(self):
-        """Returns absolute value of entries of flowField instance (still expressed as complex numbers, but with zero imaginary part and positive real part)"""
-        return flowField.__new__(self.__class__,arr=np.abs(self.copyArray()),flowDict=self.flowDict.copy())
     
     
     def ddt(self):
@@ -667,7 +663,7 @@ class flowField(np.ndarray):
             convTerm[0,:,:,1] = _convolve(u,v.ddx()) + _convolve(v,v.ddy()) + _convolve(w,v.ddz())
             convTerm[0,:,:,2] = _convolve(u,w.ddx()) + _convolve(v,w.ddy()) + _convolve(w,w.ddz())
 
-        convTerm = flowField.__new__(self.__class__,arr=convTerm.reshape(self.size),flowDict=self.flowDict.copy())
+        convTerm = flowField.__new__(self.__class__,arr=convTerm.reshape(self.size),flowDict=self.flowDict.copy(),y=self.y,D=self.D,D2=self.D2,w=self.w)
         return convTerm
         
     def residuals(self,pField=None, divFree=False,BC=True, **kwargs):
@@ -1178,15 +1174,16 @@ class flowField(np.ndarray):
                             values are boolean showing if the symmetries exist in the solution
         """
         # Initiate with all false
-        symmsDict = {'sigma1':False, 'sigma2':False,'sigma3':False,'others':'Maybe'}
+        symmsDict = {'sigma1':False, 'sigma2':False,'sigma3':False,\
+                'sigma1T':False, 'sigma2T':False, 'sigma3T':False, 'others':'Maybe'}
         # Checking for other symmetries is not ready yet, so leaving that as a 'maybe'
 
         if tol is None:
             # Use residual norm of the flowField as a reference
             if self.nd != 4:
                 warn("If using checkSymms with just vf, supply a tolerance using kwarg 'tol'")
-                tol = 1.0e-06
-                warn("tol has been set to 1.0e-06")
+                tol = 1.0e-12
+                warn("tol has been set to 1.0e-12")
             else:
                 tol = 100. * self.residuals().norm()
                 # Allow a factor of 100 over the residual norm, 
@@ -1208,7 +1205,23 @@ class flowField(np.ndarray):
         if sig3Tol <= tol:
             symmsDict['sigma3'] = True
 
+        # Check T_xz*sigma_1= T_{0,Lz/2} F_0 : [u,v,w](x,y,z) -> [u,v,-w](x, y, -z+L_z/2) 
+        sig1TTol = (self.view4d() - self.reflectZ().shiftPhase(phiZ=np.pi) ).norm()
+        if sig1TTol <= tol:
+            symmsDict['sigma1T'] = True
+
+        # Check T_xz*sigma_2= R_0 : [u,v,w](x,y,z) -> [-u,-v,w](-x, -y, z) 
+        sig2TTol = (self.view4d() - self.rotateZ() ).norm()
+        if sig2TTol <= tol:
+            symmsDict['sigma2T'] = True
+
+        # Check T_xz*sigma_3= T_{Lx/2,0} P_0 : [u,v,w](x,y,z) -> [-u,-v,-w](-x+Lx/2,-y, -z) 
+        sig3TTol = (self.view4d() - self.pointwiseInvert().shiftPhase(phiX=np.pi) ).norm()
+        if sig3TTol <= tol:
+            symmsDict['sigma3T'] = True
+
         symmsDict.update({'sigma1Tol':sig1Tol,'sigma2Tol':sig2Tol, 'sigma3Tol':sig3Tol,'tol':tol})
+        symmsDict.update({'sigma1TTol':sig1TTol,'sigma2TTol':sig2TTol, 'sigma3TTol':sig3TTol})
        
         if moreSymms:
             print("Checking for symmetries other than sigma1, sigma2, sigma3 isn't available yet.")
@@ -1334,8 +1347,8 @@ def _convolve(ff1,ff2):
     _f2 = ff2.slice(L=ff2.nx//2+1, M=ff2.nz//2+1)
     
     # Discarding the last positive modes, because numpy's fft doesn't like it if it was in there
-    _f1 = _f1.view4d().copyArray()
-    _f2 = _f2.view4d().copyArray()
+    #_f1 = _f1.view4d().copyArray()
+    #_f2 = _f2.view4d().copyArray()
     _f1 = _f1[0,:-1,:-1,0]
     _f2 = _f2[0,:-1,:-1,0]
     
