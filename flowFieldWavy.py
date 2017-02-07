@@ -965,9 +965,8 @@ def Tderivatives(flowDict):
         print("epsArr is not in flowDict. Using zeros.")
         epsArr = np.array([0.,flowDict['eps']], dtype=np.float64)
     if 'phiArr' in flowDict:    
-        phiArr = np.float64(flowDict['phiArr'] )
+        phiArr = flowDict['phiArr']
         if phiArr[0] != 0.:
-            print("phiArr is", phiArr)
             warn('phi_0 is not zero.')
     else:
         print("phiArr is not in flowDict. Using zeros.")

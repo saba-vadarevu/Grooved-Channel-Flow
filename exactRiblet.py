@@ -815,27 +815,23 @@ class exactRiblet(object):
         normMin = normArr[kMin]
         qMin = arr[kMin]
 
-        if arr[0] < arr[kMin] < arr[-1]:
-            arrNew = np.arange( arr[kMin-1], arr[kMin+1], (arr[kMin+1] - arr[kMin-1])/20.)
-            normArrNew = np.ones(arrNew.size)
-            for k in range(arrNew.size):
-                q = arrNew[k]
-                normArrNew[k] = normFun(x0+q*dx)
+       
+        for kBinary in range(25):
+            if arr[0] < arr[kMin] < arr[-1]:
+                arr = np.arange( arr[kMin-1], arr[kMin+1], (arr[kMin+1] - arr[kMin-1])/4.)
+                normArr = np.ones(arr.size)
+                for k in range(arr.size):
+                    q = arr[k]
+                    normArr[k] = normFun(x0+q*dx)
 
-            kMinNew = np.argmin(normArrNew)
-            normMinNew = normArrNew[kMinNew]
-            qMinNew = arrNew[kMinNew]
+                kMin = np.argmin(normArr)
+                normMin = normArr[kMin]
+                qMin = arr[kMin]
 
-            round2 = True
-        else:
-            round2 = False
+            else:
+                break
 
-        # print("Line search.... normArr is",normArr)
         print("Minimal norm is obtained for q in q*dx of %.2g, producing norm of %.3g"%(qMin, normMin))
-        if round2:
-            # print("Finer line search.... normArr is",normArrNew)
-            print("Minimal norm is obtained for q in q*dx of %.2g, producing norm of %.3g"%(qMinNew, normMinNew))
-            qMin = qMinNew
 
         oldNorm = normFun(x0); newNorm = normFun(x0+qMin*dx)
         if newNorm > oldNorm:
@@ -950,6 +946,23 @@ class exactRiblet(object):
         else:
             print("Initial residual norm is %.3g"%(resnorm0))
 
+        # least_squares did not offer a callback function to save intermediate solutions,
+        #   I defined this manually in scipy's libraries. This must be done when running on other systems
+        # The following callback functions saves intermediate flowfields.
+        if (self.attributes.get('saveDir',None) is not None):
+            global saveCounter
+            saveCounter = self.x.flowDict.get('counter',0)
+            savePath = self.attributes['saveDir']
+            def callbackFun(ffArr,_savePath,_fNamePrefix):
+                ff = self._symarr2ff(ffArr)
+                globals()["saveCounter"] += 1
+                fNPrefix = _fNamePrefix+'_'+str(saveCounter)+'_'
+                ff.saveh5(prefix=_savePath, fNamePrefix=fNPrefix)
+            callback = lambda ffArr: callbackFun(ffArr, savePath, self.attributes['prefix'])
+            print('Trying to save to:',savePath,', with file name prefix:', self.attributes['prefix'])
+            # callback(self._ff2symarr(self.x))
+        else:
+            callback = None
 
         
         print('Starting iterations...............')
@@ -983,27 +996,12 @@ class exactRiblet(object):
                 jacSparsityMat = self._jacSparsity()
             else:
                 jacSparsityMat = None
-            # least_squares did not offer a callback function to save intermediate solutions,
-            #   I defined this manually in scipy's libraries. This must be done when running on other systems
-            # The following callback functions saves intermediate flowfields.
-            if (method in ('dogbox','trf')) and (self.attributes.get('saveDir',None) is not None):
-                global saveCounter
-                saveCounter = self.x.flowDict.get('counter',0)
-                print('saveCounter:',saveCounter)
-                savePath = self.attributes['saveDir']
-                def callbackFun(ffArr,_savePath,_fNamePrefix):
-                    ff = self._symarr2ff(ffArr)
-                    globals()["saveCounter"] += 1
-                    fNPrefix = _fNamePrefix+'_'+str(saveCounter)+'_'
-                    ff.saveh5(prefix=_savePath, fNamePrefix=fNPrefix)
-                callback = lambda ffArr: callbackFun(ffArr, savePath, self.attributes['prefix'])
-                print('Trying to save to:',savePath,', with file name prefix:', self.attributes['prefix'])
-                callback(self._ff2symarr(self.x))
-            else:
-                callback = None
 
 
             x0Arr = self._ff2symarr(self.x)
+            print(); print()
+            print("IMPORTANT: Change the value of x.flowDict['counter'] manually after exit, since callback() cannot change it")
+            print(); print()
 
             optRes = least_squares(__resFunReal, x0Arr,jac=jac,bounds=bounds,verbose=2,jac_sparsity=jacSparsityMat,
                     method=method,max_nfev=max_nfev,xtol=xtol,ftol=ftol,gtol=gtol,callback=callback)
@@ -1055,14 +1053,22 @@ class exactRiblet(object):
             self.x = self.lineSearch(resnormFun, self.x, dxff)
            
             # I don't have to keep using imposeSymms(), but it doesn't reduce performance, so might as well
+            
             self.x.imposeSymms(sigma1=sigma1, sigma3=sigma3)
-            if (self.attributes.get('saveDir',None) is not None):
-                if 'counter' not in self.x.flowDict:
-                    self.x.flowDict['counter'] = 0
-                savePath = saveDir
-                fNamePrefix = self.attributes['prefix']+'_'+str(self.x.flowDict['counter'])+'_'
-                print(savePath, fNamePrefix)
-                self.x.saveh5(prefix=savePath, fNamePrefix=fNamePrefix)
+            if callback is not None:
+                callback(self._ff2symarr(self.x))
+                self.x.flowDict['counter'] = saveCounter
+
+            if False:
+                # Old way to save intermediate solutions. 
+                # Now using the same function that saves for trf and dogbox
+                if (self.attributes.get('saveDir',None) is not None):
+                    if 'counter' not in self.x.flowDict:
+                        self.x.flowDict['counter'] = 0
+                    savePath = saveDir
+                    fNamePrefix = self.attributes['prefix']+'_'+str(self.x.flowDict['counter'])+'_'
+                    print(savePath, fNamePrefix)
+                    self.x.saveh5(prefix=savePath, fNamePrefix=fNamePrefix)
 
 
             fnorm = resnormFun(self.x)

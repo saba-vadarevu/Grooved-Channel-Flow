@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/local/software/python/3.5.1/bin/python3
 import os
 import argparse
 import resource 
@@ -66,7 +66,7 @@ parser.add_argument("--method",help="Method to use for solving equations,\
                 Default: 'simple'", default='simple',type=str)
 parser.add_argument("--tr_solver",help="Trust region solver to use.\
         Options: 'exact', 'lsmr', 'None' (let scipy choose appropriate solver). Default: None", default=None,type=str)
-parser.add_argument("--fName",help="Input file name. If not supplied or invalid, use the first .hdf5 found (warn if multiple files are found)",default='.hdf5',type=str)
+parser.add_argument("--fName",help="Input file name. This isn't relevant if working directory has a .hdf5 file in it (warns if multiple files are found in current directory)",default='.hdf5',type=str)
 
 symParser1 = parser.add_mutually_exclusive_group(required=False)
 symParser2 = parser.add_mutually_exclusive_group(required=False)
@@ -120,6 +120,18 @@ inFileName = args.fName
 # Use args.method to decide which numpy/scipy version to use.
 # This is an issue only when running on IRIDIS. 
 ##-------------------------------------------------------------------------------
+# Numpy in my local installation doesn't seem to do so well
+#   But I need the local directory to use h5py. 
+#   So, I'll just reorder sys.path
+if method == 'simple':
+    try:
+        sys.path.remove('/home/sbv1g13/.local/lib/python3.5/site-packages')
+        sys.path.append('/home/sbv1g13/.local/lib/python3.5/site-packages')
+        # Remove from the list, and then append at the end
+    except:
+        print("Could not remove/append /home/sbv1g13/.local/lib/python3.5/site-packages")
+# I need the local installation only for dogbox and trf. So, for simple,
+#       just go with whatever installation exists on IRIDIS
 
 import exactRiblet as rib
 import numpy as np
@@ -138,8 +150,8 @@ from flowFieldWavy import *
 resolutionArr = np.zeros((4, 3, 3), dtype=np.int)
 
 resolutionArr[0,0] = [7,12,30]  # asym, simple
-resolutionArr[0,1] = [7,10,30]  # asym, dogbox
-resolutionArr[0,2] = [7,9 ,25]  # asym, trf
+resolutionArr[0,1] = [7,12,30]  # asym, dogbox
+resolutionArr[0,2] = [7,9 ,24]  # asym, trf
 
 resolutionArr[1,0] = [11,16,35]  # sigma1 or sigma3, simple
 resolutionArr[1,1] = [9 ,15,35]  # sigma1 or sigma3, dogbox
@@ -176,13 +188,13 @@ L0,M0,N0 = resolutionArr[resIndSymm, resIndMethod]
 # If L is supplied in commandline, use this value
 # Same for M and N
 changeL = True; changeM = True; changeN = True
-if (args.L is None) and not args.resolutionArr: changeL = False
+if (args.L is None) and not args.resolutionArr: changeL = False; L=7
 elif (args.L is None): L=L0
 else: L = args.L
-if (args.M is None) and not args.resolutionArr: changeM = False
+if (args.M is None) and not args.resolutionArr: changeM = False; M=10
 elif (args.M is None): M=M0
 else: M = args.M
-if (args.N is None) and not args.resolutionArr: changeN = False
+if (args.N is None) and not args.resolutionArr: changeN = False; N=30
 elif (args.N is None): N=N0
 else: N = args.N
 
@@ -205,37 +217,77 @@ elif args.phi3 != 0.: phiList.extend((args.phi1, args.phi2, args.phi3))
 elif args.phi2 != 0.: phiList.extend((args.phi1, args.phi2))
 elif args.phi1 != 0.: phiList.append(args.phi1)
 phiArr = np.array(phiList,dtype=np.float)
+phiArr = phiArr.flatten()
 
-phiArr = np.array(phiList,dtype=np.float)
+if phiArr.size != epsArr.size:
+    phiArr = np.concatenate((phiArr, np.zeros(epsArr.size-phiArr.size,dtype=np.float)))
+
 
 
 print("\n\n\nStarting time:",datetime.datetime.now())
 sys.stdout.flush()
 
-
-# Loading whatever h5 file exists in current directory
-files = os.listdir(loadPath)
+# Looking for hdf5 files in current directory
+# First, try the fName commandline argument
 fileCounter = 0
-for fileName in files:
-    if fileName.endswith(inFileName):
-        h5file = fileName
-        fileCounter += 1
-    # Find file that matches with supplied --fName, even if it's just '.hdf5'
+files = os.listdir(loadPath)
+files.sort()
 
-# If not, try again to find any .hdf5 file
-if fileCounter == 0:
+if (inFileName is not None) and (inFileName.split('/')[-1]) in files:
+    x = loadh5(inFileName.split('/')[-1])
+    fileCounter = 1
+    print('Loaded file %s from working directory'%(inFileName.split('/')[-1]))
+
+# If fName commandline argument isn't in current directory,
+#   Load any hdf5 file found in current directory
+#   Load the last one if multiple files are found
+if fileCounter ==0:
     for fileName in files:
         if fileName.endswith('.hdf5'):
             h5file = fileName
             fileCounter += 1
+            x = loadh5(h5file)
+            print('Loaded file %s from working directory'%(h5file))
 
-if fileCounter != 1:
-    warn("There are multiple files (%d) ending with hdf5 in the folder. Using %s"%(fileCounter,h5file))
+if fileCounter == 0:
+    print("Could not find a .hdf5 file in working directory.")
+    tryLoadFile = True
+else:
+    if fileCounter != 1:
+        warn("There are multiple files (%d) ending with hdf5 in the folder. Using %s"%(fileCounter,h5file))
+    tryLoadFile=False
+
+
+if tryLoadFile: 
+    if (inFileName is not None):
+        try:
+            x = loadh5(inFileName)
+            print('Loaded file %s'%(inFileName))
+        except:
+            print("commandline arg fName (%s) isn't a valid file. Appending to current directory..."%(inFileName))
+            try:
+                x = loadh5(loadPath+inFileName)
+            except:
+                print("File %s could not be found"%(inFileName))
+                warn("Could not find an appropriate .hdf5 file to load. Initializing with laminar solution...")
+                tempDict = getDefaultDict()
+                tempDict.update({'L':L, 'M':M, 'N':N, 'eps':epsArr[1], 'epsArr':epsArr,'phiArr':phiArr, 'isPois':0,'nd':4})
+                x = rib.dict2ff(tempDict)
+    else:
+        warn("Could not find an appropriate .hdf5 file to load. Initializing with laminar solution...")
+        tempDict = getDefaultDict()
+        tempDict.update({'L':L, 'M':M, 'N':N, 'eps':epsArr[1], 'epsArr':epsArr,'phiArr':phiArr, 'isPois':0,'nd':4})
+        x = rib.dict2ff(tempDict)
+
+
 
 tolEps = 1.0e-05
-x = loadh5(loadPath+ h5file)
 
 
+
+##-------------------------------------------------------------------------------------------
+# Ensure that the attributes of state-vector 'x' match with commandline arguments
+##------------------------------------------------------------------------------------------
 
 if (x.flowDict['epsArr'].size != epsArr.size) or not (x.flowDict['epsArr'] == epsArr).all():
     print("epsArr in x.flowDict is", x.flowDict['epsArr']," while epsArr from commandline is ",epsArr, ". Changing x.flowDict with new epsArr....")
@@ -281,7 +333,6 @@ if x.flowDict['counter']== 0:
 ##----------------------------------------------------------------------------------------------
 
 
-L = x.nx//2; M = x.nz//2; N = x.N
 start = time.time()
 print("x.flowDict:", x.flowDict)
 print("Method: %s, WithJac:%s, iterMax:%d, sigma1:%s, sigma3:%s, sigma1T:%s, sigma3T:%s"%(method,supplyJac,iterMax, sigma1,sigma3,sigma1T,sigma3T))
