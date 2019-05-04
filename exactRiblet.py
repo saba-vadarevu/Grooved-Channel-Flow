@@ -855,6 +855,9 @@ class exactRiblet(object):
         method = self.attributes['method']
         sigma1 = self.attributes['sigma1']; sigma3 = self.attributes['sigma3']
         
+        # Ensure initial flowfield has the symmetries that are being imposed
+        self.x.imposeSymms(sigma1=sigma1, sigma3=sigma3)
+        
 
         if method in ("trf","dogbox","lm"):
             trustRegion= True
@@ -1010,6 +1013,8 @@ class exactRiblet(object):
             xNew = self._symarr2ff(xArr)
             
             self.x = xNew
+            print("Final residual norm from class method is %.4g"%(self.x.residuals().norm()))
+            print("Final residual norm from symarr is %.4g"%(np.linalg.norm(__resFunReal(xArr))))
             sys.stdout = orig_stdout
             return xNew, optRes.cost, optRes.status
 

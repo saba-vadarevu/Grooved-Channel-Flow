@@ -243,8 +243,8 @@ def chebnorm2(vec,N):
     return chebnorm(vec,N)
 
 def _chebcoeffsvec(f):
-    f = f.flatten()
-    a =  np.fft(np.append(f,f[N-2:0:-1]))  
+    f = f.flatten(); N = f.size
+    a =  np.fft.fft(np.append(f,f[N-2:0:-1]))  
     a = a[:N]/(N-1.)*np.concatenate(([0.5],np.ones(N-2),[0.5]))
     return a
 
@@ -278,7 +278,7 @@ def _chebcoll_vec_vec(a):
     N = a.size
     a = a*(N-1.)/np.concatenate(([0.5],np.ones(N-2),[0.5]))
 
-    f = np.ifft(np.append(a,a[N-2:0:-1]))
+    f = np.fft.ifft(np.append(a,a[N-2:0:-1]))
     
     return f[:N]
 	

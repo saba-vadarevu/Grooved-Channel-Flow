@@ -14,7 +14,7 @@ def ff2arr(ff):
     For streamwise or spanwise wavy flowfields, this is just vf.view1d()
     For oblique, I need to collect only modes along k*(l,m)"""
     if ff.flowDict['L']*ff.flowDict['M']==0:
-        return ff.view1d().copyArray()
+        return ff.copyArray().flatten()
     assert ff.nx == ff.nz
     ffArr = np.zeros((ff.nx,ff.nd,ff.N), dtype=np.complex)
     for k in range(ff.nx):

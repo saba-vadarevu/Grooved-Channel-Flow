@@ -1,4 +1,4 @@
-#!/local/software/python/3.5.1/bin/python3
+#!/usr/bin/python3
 import os
 import argparse
 import resource 
@@ -123,15 +123,16 @@ inFileName = args.fName
 # Numpy in my local installation doesn't seem to do so well
 #   But I need the local directory to use h5py. 
 #   So, I'll just reorder sys.path
-if method == 'simple':
-    try:
-        sys.path.remove('/home/sbv1g13/.local/lib/python3.5/site-packages')
-        sys.path.append('/home/sbv1g13/.local/lib/python3.5/site-packages')
-        # Remove from the list, and then append at the end
-    except:
-        print("Could not remove/append /home/sbv1g13/.local/lib/python3.5/site-packages")
-# I need the local installation only for dogbox and trf. So, for simple,
-#       just go with whatever installation exists on IRIDIS
+if False:
+    if method == 'simple':
+        try:
+            sys.path.remove('/home/sbv1g13/.local/lib/python3.5/site-packages')
+            sys.path.append('/home/sbv1g13/.local/lib/python3.5/site-packages')
+            # Remove from the list, and then append at the end
+        except:
+            print("Could not remove/append /home/sbv1g13/.local/lib/python3.5/site-packages")
+    # I need the local installation only for dogbox and trf. So, for simple,
+    #       just go with whatever installation exists on IRIDIS
 
 import exactRiblet as rib
 import numpy as np
@@ -205,8 +206,9 @@ elif args.eps5 != 0.: epsList.extend((args.eps1, args.eps2, args.eps3, args.eps4
 elif args.eps4 != 0.: epsList.extend((args.eps1, args.eps2, args.eps3, args.eps4))
 elif args.eps3 != 0.: epsList.extend((args.eps1, args.eps2, args.eps3))
 elif args.eps2 != 0.: epsList.extend((args.eps1, args.eps2))
-elif args.eps1 != 0.: epsList.append(args.eps1)
+else: epsList.append(args.eps1)
 epsArr = np.array(epsList,dtype=np.float)
+epsArr = epsArr.flatten()
 
 # Parsing phases into phiArr
 phiList = [0.]
@@ -215,7 +217,7 @@ elif args.phi5 != 0.: phiList.extend((args.phi1, args.phi2, args.phi3, args.phi4
 elif args.phi4 != 0.: phiList.extend((args.phi1, args.phi2, args.phi3, args.phi4))
 elif args.phi3 != 0.: phiList.extend((args.phi1, args.phi2, args.phi3))
 elif args.phi2 != 0.: phiList.extend((args.phi1, args.phi2))
-elif args.phi1 != 0.: phiList.append(args.phi1)
+else: phiList.append(args.phi1)
 phiArr = np.array(phiList,dtype=np.float)
 phiArr = phiArr.flatten()
 
@@ -254,7 +256,7 @@ if fileCounter == 0:
     tryLoadFile = True
 else:
     if fileCounter != 1:
-        warn("There are multiple files (%d) ending with hdf5 in the folder. Using %s"%(fileCounter,h5file))
+        print("There are multiple files (%d) ending with hdf5 in the folder. Using %s"%(fileCounter,h5file))
     tryLoadFile=False
 
 
@@ -269,12 +271,12 @@ if tryLoadFile:
                 x = loadh5(loadPath+inFileName)
             except:
                 print("File %s could not be found"%(inFileName))
-                warn("Could not find an appropriate .hdf5 file to load. Initializing with laminar solution...")
+                print("Could not find an appropriate .hdf5 file to load. Initializing with laminar solution...")
                 tempDict = getDefaultDict()
                 tempDict.update({'L':L, 'M':M, 'N':N, 'eps':epsArr[1], 'epsArr':epsArr,'phiArr':phiArr, 'isPois':0,'nd':4})
                 x = rib.dict2ff(tempDict)
     else:
-        warn("Could not find an appropriate .hdf5 file to load. Initializing with laminar solution...")
+        print("Could not find an appropriate .hdf5 file to load. Initializing with laminar solution...")
         tempDict = getDefaultDict()
         tempDict.update({'L':L, 'M':M, 'N':N, 'eps':epsArr[1], 'epsArr':epsArr,'phiArr':phiArr, 'isPois':0,'nd':4})
         x = rib.dict2ff(tempDict)
@@ -335,13 +337,18 @@ if x.flowDict['counter']== 0:
 
 start = time.time()
 print("x.flowDict:", x.flowDict)
+print();print()
 print("Method: %s, WithJac:%s, iterMax:%d, sigma1:%s, sigma3:%s, sigma1T:%s, sigma3T:%s"%(method,supplyJac,iterMax, sigma1,sigma3,sigma1T,sigma3T))
 sys.stdout.flush()
 tRun = 0.
 start0 = time.time()
 
+# Ensure that the initial iterate has the symmetries of ffProb
+x.imposeSymms(sigma1=sigma1, sigma3=sigma3)
+
 ffProb = rib.exactRiblet(x=x, sigma1=sigma1, sigma3=sigma3, method=method, iterMax=iterMax,
         tol=tol, log=logName, prefix=fNamePrefix, supplyJac=supplyJac, saveDir=loadPath+'tmp/')
+
 
 #sys.exit()
 
@@ -358,7 +365,7 @@ x.saveh5(fNamePrefix=fNamePrefix,prefix=loadPath)
 
 print("Total run time (minutes):%d" %((time.time()-start0)/60.))
 
-if fnorm[-1] <= tol:
+if np.array([fnorm]).flatten()[-1] <= tol:
     print("Iterations have converged")
     sys.stdout.flush()
 else:

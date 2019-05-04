@@ -589,7 +589,7 @@ class flowField(np.ndarray):
         return ((q*self.view4d()).flatten()).copyArray()
     
     
-    def convNL(self, fft=True):
+    def convNL(self, fft=True,**kwargs):
         """Computes the non-linear convection term
         Warning: Currently, the code assumes that the flowField supplied is that of a steady flow. Temporal frequencies are not accounted for"""
         

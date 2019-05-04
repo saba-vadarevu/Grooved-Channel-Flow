@@ -554,11 +554,16 @@ class flowFieldWavy(flowField):
         """
         L = self.flowDict['L']
         M = self.flowDict['M']
-        if L != 0: Lnew = L+5
+        N = self.flowDict['N']
+        Ladd = kwargs.get('Ladd',4)
+        Madd = kwargs.get('Madd',4)
+        if L != 0: Lnew = L+ Ladd
         else: Lnew = L
-        if M != 0: Mnew = M+5
+        if M != 0: Mnew = M+ Madd
         else: Mnew = M
-        self = self.slice(L=Lnew, M=Mnew)
+        Nnew = np.int(1.2*N)
+        self = self.slice(L=Lnew, M=Mnew,N=Nnew)
+        self.setWallVel()
         vf = self.slice(nd=[0,1,2])
         if self.nd==4:
             pField = self.getScalar(nd=3)
@@ -568,7 +573,7 @@ class flowFieldWavy(flowField):
             pField = pField.slice(L=Lnew,M=Mnew)
         res = flowField.residuals(self,pField=pField, **kwargs)
 
-        return res.slice(L=L,M=M)
+        return res.slice(L=L,M=M,N=N)
    
     def printPhysical(self,**kwargs):
         '''Refer to flowField.printCSV()
